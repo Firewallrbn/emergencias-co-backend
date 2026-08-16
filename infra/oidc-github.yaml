@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Confianza entre GitHub Actions y esta cuenta de AWS mediante OIDC.
+
+  Es la pieza que permite cumplir "cero variables de entorno estaticas" tambien en el
+  CI. La alternativa habitual —crear un usuario IAM, generar una access key y pegarla en
+  los secretos del repositorio— deja una credencial de larga vida en un sitio del que hay
+  que acordarse de rotarla, y que cualquiera con permisos de escritura en el repositorio
+  puede llegar a filtrar en un log.
+
+  Con OIDC no hay ninguna llave. GitHub firma un token efimero por cada ejecucion, AWS
+  verifica la firma y entrega credenciales temporales que caducan al terminar el trabajo.
+
+  Se despliega una sola vez:
+    aws cloudformation deploy --template-file infra/oidc-github.yaml \
+      --stack-name emergencias-oidc --capabilities CAPABILITY_NAMED_IAM --region us-east-2 \
+      --parameter-overrides RepositorioGitHub=Firewallrbn/emergencias-co-backend
+
+Parameters:
+  RepositorioGitHub:
+    Type: String
+    Default: Firewallrbn/emergencias-co-backend
+    Description: Repositorio autorizado, en formato propietario/nombre.
+
+  RamaDespliegue:
+    Type: String
+    Default: main
+    Description: >
+      Unica rama desde la que se permite desplegar. Restringirla importa: sin esto,
+      cualquiera que abra una rama en el repositorio podria asumir el rol.
+
+Resources:
+  ProveedorGitHub:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      # AWS ya no exige la huella del certificado para este proveedor: la valida contra
+      # las CA publicas. Se deja la historica por compatibilidad con regiones antiguas.
+      ThumbprintList: ['6938fd4d98bab03faadb97b34396831e3780aea1']
+
+  RolDespliegue:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: emergencias-github-actions
+      Description: Rol que asume GitHub Actions para desplegar los microservicios
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Ref ProveedorGitHub
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                # Sin esta condicion, un token emitido para OTRO servicio de AWS podria
+                # reutilizarse aqui.
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Solo este repositorio y solo esta rama. `ref:refs/heads/main` excluye
+                # las ramas de trabajo y los pull requests, que no deben desplegar.
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositorioGitHub}:ref:refs/heads/${RamaDespliegue}'
+
+      Policies:
+        - PolicyName: desplegar-emergencias
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # --- CloudFormation: solo los stacks de este proyecto ---
+              - Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeStackResource
+                  - cloudformation:DescribeStackResources
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:ListStackResources
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/emergencias-*/*'
+                  # SAM necesita transformar la plantilla, y la transformacion es un
+                  # "stack" gestionado por AWS que vive fuera de nuestro prefijo.
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+
+              # --- Bucket de artefactos que gestiona la propia SAM CLI ---
+              - Effect: Allow
+                Action: [s3:PutObject, s3:GetObject, s3:ListBucket, s3:GetBucketLocation]
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::aws-sam-cli-managed-default-*'
+                  - !Sub 'arn:${AWS::Partition}:s3:::aws-sam-cli-managed-default-*/*'
+
+              # --- Las funciones y su despliegue progresivo ---
+              - Effect: Allow
+                Action: [lambda:*]
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:emergencias-*'
+              - Effect: Allow
+                Action: [lambda:GetEventSourceMapping, lambda:CreateEventSourceMapping, lambda:UpdateEventSourceMapping, lambda:DeleteEventSourceMapping, lambda:ListEventSourceMappings]
+                # Los mapeos de origen de eventos no admiten ARN por recurso.
+                Resource: '*'
+
+              - Effect: Allow
+                Action: [codedeploy:*]
+                Resource: '*'
+
+              - Effect: Allow
+                Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:DescribeAlarms]
+                Resource: !Sub 'arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:emergencias-*'
+
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:DeleteLogGroup, logs:DescribeLogGroups, logs:PutRetentionPolicy, logs:TagResource, logs:ListTagsForResource]
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/emergencias-*'
+
+              - Effect: Allow
+                Action: [sqs:*]
+                Resource: !Sub 'arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:emergencias-*'
+
+              - Effect: Allow
+                Action: [apigateway:*]
+                Resource: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}::*'
+
+              # --- IAM: acotado a los roles de este proyecto ---
+              #
+              # Es el permiso mas delicado de toda la politica. Poder crear roles es poder
+              # escalar privilegios, asi que se restringe por prefijo de nombre: el CI solo
+              # puede tocar roles que empiecen por `emergencias-`.
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:role/emergencias-*'
+
+Outputs:
+  ArnRol:
+    Description: Valor para el secreto AWS_ROLE_ARN del repositorio de GitHub
+    Value: !GetAtt RolDespliegue.Arn

@@ -1,0 +1,139 @@
+name: Desplegar
+
+# Solo desde main. Cada microservicio conserva su propio ciclo de vida de despliegue:
+# el trabajo `detectar` mira que cambio y `desplegar` levanta un trabajo INDEPENDIENTE por
+# cada servicio afectado. Tocar `geo` no redespliega `intake`.
+#
+# Se eligió una matriz con detección de cambios en lugar de cuatro archivos casi idénticos
+# con filtros `paths:`. El comportamiento es el mismo —despliegues independientes— pero un
+# arreglo en el proceso se hace una vez y no cuatro, que es donde suelen aparecer las
+# divergencias silenciosas entre servicios.
+on:
+  push:
+    branches: [main]
+  # Permite desplegar a mano un servicio concreto desde la pestaña Actions, util para
+  # rehacer un despliegue sin tener que inventar un commit.
+  workflow_dispatch:
+    inputs:
+      servicio:
+        description: Servicio a desplegar
+        required: true
+        type: choice
+        options: [todos, intake, dispatch, geo, notify]
+
+permissions:
+  # Imprescindible para OIDC: sin este permiso GitHub no emite el token que AWS verifica.
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-2
+
+jobs:
+  detectar:
+    name: Qué cambió
+    runs-on: ubuntu-latest
+    outputs:
+      servicios: ${{ steps.calcular.outputs.servicios }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Hacen falta dos commits para poder comparar con el anterior.
+          fetch-depth: 2
+
+      - id: calcular
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.servicio }}" = "todos" ]; then
+              echo 'servicios=["intake","dispatch","geo","notify"]' >> "$GITHUB_OUTPUT"
+            else
+              echo 'servicios=["${{ inputs.servicio }}"]' >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          cambios=$(git diff --name-only HEAD^ HEAD)
+
+          # Un cambio en el paquete compartido afecta a los cuatro: todos lo empaquetan
+          # dentro de su bundle, así que ninguno se entera del cambio hasta redesplegarse.
+          if echo "$cambios" | grep -qE '^(packages/shared/|package-lock\.json|tsconfig\.base\.json)'; then
+            echo "Cambió el paquete compartido: se redespliegan los cuatro"
+            echo 'servicios=["intake","dispatch","geo","notify"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          lista='[]'
+          for servicio in intake dispatch geo notify; do
+            if echo "$cambios" | grep -q "^services/$servicio/"; then
+              lista=$(echo "$lista" | jq -c --arg s "$servicio" '. + [$s]')
+            fi
+          done
+
+          echo "Servicios a desplegar: $lista"
+          echo "servicios=$lista" >> "$GITHUB_OUTPUT"
+
+  desplegar:
+    name: Desplegar ${{ matrix.servicio }}
+    needs: detectar
+    if: needs.detectar.outputs.servicios != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      # Sin fail-fast: que un servicio falle no debe cancelar el despliegue de los otros.
+      # Son independientes, y cancelarlos a medias dejaría el sistema en un estado peor.
+      fail-fast: false
+      matrix:
+        servicio: ${{ fromJson(needs.detectar.outputs.servicios) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Construir el bundle
+        run: npm run build --workspace "@emergencias/${{ matrix.servicio }}"
+
+      # Sin access keys. GitHub firma un token efímero, AWS lo verifica y devuelve
+      # credenciales temporales que caducan al terminar el trabajo. No hay ningún secreto
+      # de larga vida guardado en el repositorio.
+      - name: Autenticarse en AWS por OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gh-${{ matrix.servicio }}-${{ github.run_id }}
+
+      - uses: aws-actions/setup-sam@v2
+        with:
+          use-installer: true
+
+      - name: Desplegar con canary
+        working-directory: services/${{ matrix.servicio }}
+        run: |
+          sam deploy \
+            --template-file template.yaml \
+            --stack-name "emergencias-${{ matrix.servicio }}" \
+            --region "$AWS_REGION" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --resolve-s3 \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset
+
+      # `sam deploy` espera a que CodeDeploy termine el canary, así que llegar aquí
+      # significa que el despliegue progresivo pasó las alarmas. Si alguna hubiera saltado,
+      # CodeDeploy habría revertido y el paso anterior habría fallado.
+      - name: Comprobar la salud tras el despliegue
+        run: |
+          url=$(aws cloudformation describe-stacks \
+            --stack-name emergencias-gateway --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='UrlBase'].OutputValue" --output text)
+
+          estado=$(curl -s -o /dev/null -w '%{http_code}' "$url/v1/health")
+          echo "GET $url/v1/health -> $estado"
+          [ "$estado" = "200" ] || exit 1
