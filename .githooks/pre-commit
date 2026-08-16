@@ -1,0 +1,20 @@
+#!/bin/sh
+# Guarda anti-secretos. El enunciado prohíbe secretos incluso en commits históricos:
+# es mucho más barato bloquear aquí que reescribir el historial después.
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks no está instalado. Instálalo con: scoop install gitleaks"
+  echo "pre-commit: commit ABORTADO (no se puede verificar la ausencia de secretos)."
+  exit 1
+fi
+
+echo "pre-commit: escaneando cambios en busca de secretos..."
+if ! gitleaks protect --staged --config .gitleaks.toml --redact --verbose; then
+  echo ""
+  echo "pre-commit: SE DETECTARON SECRETOS. Commit abortado."
+  echo "Saca el valor del código y muévelo a AWS Parameter Store (/emergencias/prod/...)."
+  exit 1
+fi
+
+echo "pre-commit: limpio."
+exit 0

@@ -1,0 +1,35 @@
+# === SECRETOS — el enunciado prohíbe .env incluso en commits históricos ===
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+credentials
+.aws/
+secrets.json
+
+# Dependencias y build
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# SAM / CloudFormation
+.aws-sam/
+samconfig.toml
+packaged.yaml
+
+# Logs y temporales
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editores
+.vscode/
+.idea/
+
+# Evidencias pesadas (las capturas van en docs/evidencias/ y sí se versionan)
+*.mp4
+*.mov

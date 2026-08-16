@@ -1,0 +1,45 @@
+title = "emergencias-co-backend — política de cero secretos"
+
+# Hereda todas las reglas por defecto de gitleaks (AWS, GitHub, Stripe, etc.)
+[extend]
+useDefault = true
+
+# --- Reglas propias para el dominio de este parcial ---
+
+[[rules]]
+id = "supabase-jwt"
+description = "JWT de Supabase (anon o service_role). En el BACKEND no debe existir ninguno: los servicios usan roles Postgres."
+regex = '''eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'''
+tags = ["supabase", "jwt"]
+
+[[rules]]
+id = "supabase-api-key-new"
+description = "Llave de API de Supabase en formato nuevo (sb_secret_ / sb_publishable_)"
+regex = '''sb_(secret|publishable)_[A-Za-z0-9_-]{20,}'''
+tags = ["supabase"]
+
+[[rules]]
+id = "postgres-connection-string"
+description = "Cadena de conexión Postgres con contraseña embebida"
+regex = '''postgres(ql)?:\/\/[^:\s]+:[^@\s]+@[^\s/]+'''
+tags = ["database"]
+
+[[rules]]
+id = "supabase-project-url"
+description = "URL de proyecto Supabase hardcodeada (debe venir de Parameter Store)"
+regex = '''https:\/\/[a-z]{20}\.supabase\.co'''
+tags = ["supabase", "config"]
+
+[allowlist]
+description = "Excepciones controladas"
+paths = [
+  '''\.gitleaks\.toml$''',
+  '''package-lock\.json$''',
+  '''\.env\.example$''',
+]
+# Marcadores de posición que aparecen en documentación y plantillas
+regexes = [
+  '''<[A-Z_]+>''',
+  '''\$\{[A-Za-z_]+\}''',
+  '''(EJEMPLO|PLACEHOLDER|REEMPLAZAR|xxxxx)''',
+]
