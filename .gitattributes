@@ -1,0 +1,13 @@
+# Normalización de fin de línea.
+# Crítico: con core.autocrlf=true (la config global de esta máquina) los scripts de shell
+# recibirían CRLF y el intérprete fallaría con "bad interpreter: /bin/sh^M".
+* text=auto eol=lf
+
+*.sh        text eol=lf
+.githooks/* text eol=lf
+
+# Binarios: nunca tocar
+*.png binary
+*.jpg binary
+*.gif binary
+*.pdf binary
