@@ -108,6 +108,11 @@ Resources:
                   # SAM necesita transformar la plantilla, y la transformacion es un
                   # "stack" gestionado por AWS que vive fuera de nuestro prefijo.
                   - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31'
+                  # `--resolve-s3` hace que la SAM CLI administre este stack suyo, que crea
+                  # el bucket de artefactos. Sin permiso sobre el, el despliegue falla con
+                  # un AccessDenied sobre un stack que uno no escribio y cuesta relacionar.
+                  # Se nombra explicitamente en lugar de ampliar el comodin.
+                  - !Sub 'arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/aws-sam-cli-managed-default/*'
 
               # --- Bucket de artefactos que gestiona la propia SAM CLI ---
               - Effect: Allow
