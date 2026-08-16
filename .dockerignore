@@ -1,0 +1,34 @@
+# El contexto de build es la raiz del monorepo, asi que hay que ser estrictos: cada MB
+# enviado al daemon se paga en cada build, y node_modules aqui son cientos de miles de
+# archivos que ademas OneDrive esta sincronizando.
+
+node_modules
+**/node_modules
+
+.git
+.github
+.githooks
+
+# Nada de esto entra en una imagen de Lambda
+docs
+db
+scripts
+fixtures
+infra
+.agents
+.claude
+*.md
+.gitleaks.toml
+.mcp.json
+skills-lock.json
+
+# Artefactos de build y despliegue
+dist
+.aws-sam
+samconfig.toml
+
+# Por si acaso: jamas debe existir, pero que no entre a la imagen si existiera
+.env
+.env.*
+*.pem
+*.key

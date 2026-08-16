@@ -12,9 +12,10 @@ Backend serverless del Parcial 1 de *Patrones Arquitectónicos Avanzados*. Antes
    El hook de pre-commit (`gitleaks`) aborta el commit si detecta algo.
 2. **Nunca uses la `service_role` key de Supabase en una Lambda.** Bypassea RLS y anula el
    criterio que se está evaluando. Cada servicio se conecta con su propio rol Postgres.
-3. **Las imágenes se etiquetan con el SHA del commit, nunca `latest`.** Con `PackageType: Image`,
-   SAM solo publica una versión nueva de Lambda si cambia el URI de la imagen — y sin versión
-   nueva no hay despliegue Canary.
+3. **Las Lambdas se despliegan como paquete zip, no como imagen.** Decisión explícita del
+   equipo por costo, aunque el enunciado pide ECR: queda documentada como desviación en el
+   informe, no como olvido. Los `Dockerfile` y el `docker-compose.yml` siguen vivos para la
+   demostración local. El zip lo produce esbuild y pesa ~700 KB, sin `node_modules`.
 4. **Toda integración de API Gateway apunta al alias `prod`**, nunca a `$LATEST`. Si apunta a
    `$LATEST`, el canary no divide tráfico y se pierde el 20 % de la rúbrica.
 5. **Las alarmas de CloudWatch llevan `TreatMissingData: notBreaching`.** Si quedan en

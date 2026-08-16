@@ -1,0 +1,218 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Service 1 - Intake & Triage. Stack independiente: este microservicio tiene su propio
+  ciclo de vida de despliegue y no comparte plantilla con los demas.
+
+Parameters:
+  Etapa:
+    Type: String
+    Default: prod
+
+  PrefijoConfig:
+    Type: String
+    Default: /emergencias/prod/intake
+    Description: >
+      Prefijo en Parameter Store del que la funcion lee su configuracion en el arranque
+      en frio. No es un secreto: lo secreto es lo que hay detras del prefijo.
+
+  UmbralLatenciaMs:
+    Type: Number
+    Default: 1500
+    Description: Latencia p95 por encima de la cual se aborta el despliegue canary.
+
+  ConcurrenciaReservada:
+    Type: Number
+    Default: 0
+    Description: >
+      Patron Bulkhead: concurrencia reservada para aislar este servicio de los demas.
+      Queda en 0 (sin reserva) porque esta cuenta de AWS es nueva y tiene un limite de
+      solo 10 ejecuciones concurrentes en total. Reservar cualquier cantidad dejaria el
+      pool sin reservar por debajo del minimo de 10 que exige Lambda, y el despliegue
+      falla. Si algun dia se eleva la cuota, basta con pasar un valor mayor que 0.
+
+Conditions:
+  HayReserva: !Not [!Equals [!Ref ConcurrenciaReservada, 0]]
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 15
+    Tracing: Active
+
+Resources:
+  # ---------------------------------------------------------------------------------
+  # Funcion
+  # ---------------------------------------------------------------------------------
+  FuncionIntake:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: emergencias-intake
+      # El bundle de esbuild ya trae todas las dependencias dentro, asi que el paquete
+      # es un unico archivo de ~700 KB sin node_modules. Se construye con `npm run build`
+      # antes de desplegar (ver scripts/desplegar-intake.ps1).
+      CodeUri: dist/
+      Handler: index.handler
+      Description: Recepcion de reportes ciudadanos, triage determinista e idempotencia
+
+      # Patron: Bulkhead. Un pico de trafico en intake no deberia consumir toda la
+      # concurrencia de la cuenta y dejar sin ejecuciones a dispatch o notify.
+      # Desactivado por la cuota de 10 concurrentes de esta cuenta (ver el parametro).
+      ReservedConcurrentExecutions: !If [HayReserva, !Ref ConcurrenciaReservada, !Ref 'AWS::NoValue']
+
+      Environment:
+        Variables:
+          CONFIG_PREFIX: !Ref PrefijoConfig
+          SERVICE_NAME: intake
+          LOG_LEVEL: info
+          # Mantiene viva la conexion TCP entre invocaciones del mismo contenedor.
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+
+      # --- Despliegue progresivo -----------------------------------------------------
+      # El alias es lo que recibe el trafico; API Gateway apunta al alias, nunca a
+      # $LATEST. Sin esto el canary no puede dividir trafico.
+      AutoPublishAlias: !Ref Etapa
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Role: !GetAtt RolCodeDeploy.Arn
+        Alarms:
+          - !Ref AlarmaErrores
+          - !Ref AlarmaLatencia
+          - !Ref AlarmaApi5xx
+
+      # --- IAM de minimo privilegio --------------------------------------------------
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            # Solo su propio prefijo. No puede leer los parametros de los otros servicios.
+            #
+            # Hacen falta los DOS ARN. GetParametersByPath se autoriza contra el nodo del
+            # path en si (sin barra final), mientras que leer cada parametro individual se
+            # autoriza contra lo que cuelga de el. Con solo el comodin, la llamada falla
+            # con "no identity-based policy allows the ssm:GetParametersByPath action".
+            - Effect: Allow
+              Action:
+                - ssm:GetParametersByPath
+                - ssm:GetParameter
+                - ssm:GetParameters
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PrefijoConfig}'
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PrefijoConfig}/*'
+            # Descifrar SecureString requiere la clave gestionada de SSM, y solo a traves
+            # del servicio SSM: la condicion impide usarla para cualquier otra cosa.
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+
+  # ---------------------------------------------------------------------------------
+  # Logs
+  # ---------------------------------------------------------------------------------
+  GrupoLogs:
+    Type: AWS::Logs::LogGroup
+    # Se declara explicitamente en vez de dejar que Lambda lo cree, para poder fijar la
+    # retencion: sin ella los logs se guardan para siempre y el costo crece sin techo.
+    Properties:
+      LogGroupName: /aws/lambda/emergencias-intake
+      RetentionInDays: 7
+
+  # ---------------------------------------------------------------------------------
+  # Alarmas que vigilan el canary
+  #
+  # Las tres llevan TreatMissingData: notBreaching. Es el detalle que mas veces rompe
+  # esta configuracion: una alarma en INSUFFICIENT_DATA nunca dispara el rollback, y el
+  # despliegue defectuoso pasa como si nada.
+  # ---------------------------------------------------------------------------------
+  AlarmaErrores:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-intake-errores
+      AlarmDescription: Errores no controlados en la version que esta recibiendo el canary
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FuncionIntake
+        - Name: Resource
+          Value: !Sub '${FuncionIntake}:${Etapa}'
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  AlarmaLatencia:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-intake-latencia
+      AlarmDescription: Latencia p95 por encima del umbral acordado
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FuncionIntake
+        - Name: Resource
+          Value: !Sub '${FuncionIntake}:${Etapa}'
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: !Ref UmbralLatenciaMs
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmaApi5xx:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-intake-api-5xx
+      AlarmDescription: >
+        Respuestas 5xx en el API Gateway. Hace falta ademas de la alarma de errores de
+        Lambda porque el manejador de errores devuelve 500 en vez de relanzar, asi que
+        un fallo interno no incrementa la metrica Errors. Sin esta alarma, un servicio
+        roto pasaria el canary sin que nadie lo revirtiera.
+      Namespace: AWS/ApiGateway
+      MetricName: 5XXError
+      Dimensions:
+        - Name: ApiName
+          Value: emergencias-api
+        - Name: Stage
+          Value: !Ref Etapa
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  # ---------------------------------------------------------------------------------
+  # Rol de CodeDeploy
+  # ---------------------------------------------------------------------------------
+  RolCodeDeploy:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: emergencias-intake-codedeploy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSCodeDeployRoleForLambdaLimited'
+
+Outputs:
+  ArnAlias:
+    Description: ARN del alias de produccion. Es lo que integra el API Gateway.
+    Value: !Ref FuncionIntake.Alias
+    Export:
+      Name: emergencias-intake-alias-arn
+
+  NombreFuncion:
+    Value: !Ref FuncionIntake
+    Export:
+      Name: emergencias-intake-nombre
