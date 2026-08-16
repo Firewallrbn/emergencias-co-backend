@@ -24,17 +24,30 @@ Parameters:
 
   PatronSujeto:
     Type: String
-    Default: 'repo:Firewallrbn/emergencias-co-backend:ref:refs/heads/main'
+    Default: 'repo:Firewallrbn@161855153/emergencias-co-backend@1335528421:ref:refs/heads/main'
     Description: >
       Patron que debe cumplir la reclamacion `sub` del token de GitHub. Admite comodines.
 
-      Conviene que sea lo mas estrecho posible: con `repo:owner/nombre:*` cualquiera que
-      abra una rama en el repositorio podria asumir el rol. Lo correcto es fijar la rama,
-      como en el valor por defecto.
+      OJO CON EL FORMATO. Casi toda la documentacion que circula dice que el sujeto es
+      `repo:propietario/nombre:ref:refs/heads/main`, y con eso el rol NUNCA se puede
+      asumir: AWS responde un escueto "Not authorized to perform
+      sts:AssumeRoleWithWebIdentity" sin decir contra que comparo.
 
-      Se deja parametrizado porque el formato de `sub` cambia segun el disparador: un
-      push a main produce `ref:refs/heads/main`, un pull request produce
-      `pull_request`, y un job con `environment` produce `environment:<nombre>`.
+      GitHub emite hoy identificadores numericos inmutables pegados al propietario y al
+      repositorio:
+
+        repo:Firewallrbn@161855153/emergencias-co-backend@1335528421:ref:refs/heads/main
+
+      Y es mejor asi: esos identificadores sobreviven a un renombrado y evitan que alguien
+      registre el nombre liberado y herede la confianza.
+
+      El paso "Mostrar el sujeto del token OIDC" de deploy.yml imprime el valor real, que
+      es la unica forma fiable de averiguarlo.
+
+      La parte final tambien cambia segun el disparador: un push o un workflow_dispatch
+      sobre main producen `ref:refs/heads/main`, un pull request produce `pull_request`,
+      y un job con environment produce `environment:<nombre>`. Fijar la rama importa: con
+      `:*` al final, cualquiera que abriera una rama podria asumir el rol.
 
 Resources:
   ProveedorGitHub:
