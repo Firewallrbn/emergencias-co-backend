@@ -5,7 +5,8 @@
   "type": "module",
   "description": "Service 1 - Recepcion de reportes, triage determinista e idempotencia",
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=cjs --external:pg-native --minify --outfile=dist/index.js"
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=cjs --external:pg-native --minify --define:__CAOS__=false --outfile=dist/index.js",
+    "build:caos": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=cjs --external:pg-native --minify --define:__CAOS__=true --outfile=dist/index.js"
   },
   "dependencies": {
     "@aws-sdk/client-ssm": "^3.700.0",

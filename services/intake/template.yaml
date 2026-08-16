@@ -73,7 +73,11 @@ Resources:
       # --- Despliegue progresivo -----------------------------------------------------
       # El alias es lo que recibe el trafico; API Gateway apunta al alias, nunca a
       # $LATEST. Sin esto el canary no puede dividir trafico.
+      # Solo publica version nueva cuando cambia el CODIGO, no la configuracion. Por eso
+      # la prueba de resiliencia inyecta el fallo con `--define` de esbuild (npm run
+      # build:caos) en vez de con una variable de entorno: asi el bundle cambia de verdad.
       AutoPublishAlias: !Ref Etapa
+
       DeploymentPreference:
         Type: Canary10Percent5Minutes
         Role: !GetAtt RolCodeDeploy.Arn

@@ -240,7 +240,7 @@ async function salud(): Promise<RespuestaHttp> {
   };
 }
 
-export const handler = manejarErrores(async (evento: EventoApiGateway): Promise<RespuestaHttp> => {
+const enrutar = manejarErrores(async (evento: EventoApiGateway): Promise<RespuestaHttp> => {
   const metodo = evento.httpMethod ?? 'GET';
   const ruta = evento.resource ?? evento.path ?? '/';
 
@@ -250,3 +250,37 @@ export const handler = manejarErrores(async (evento: EventoApiGateway): Promise<
 
   throw noEncontrado(`La ruta ${metodo} ${ruta}`);
 });
+
+/**
+ * Inyeccion de fallo sintetico para validar el rollback automatico del canary.
+ *
+ * `__CAOS__` lo sustituye esbuild en tiempo de compilacion (`--define`), no es una
+ * variable de entorno. La diferencia importa y costo dos intentos descubrirlo:
+ *
+ *   - Cambiar una variable de entorno actualiza $LATEST pero NO publica una version
+ *     nueva, asi que el alias sigue apuntando a la anterior y CodeDeploy ni se entera.
+ *   - `AutoPublishCodeSha256` serviria para forzarlo, pero solo acepta una cadena
+ *     literal: no admite !Sub ni !Ref, asi que no se puede atar a un parametro.
+ *
+ * Sustituyendolo en compilacion, el bundle cambia de verdad y con el su hash, que es lo
+ * que SAM mira para publicar una version. Ademas es mas fiel a lo que se quiere simular:
+ * un despliegue defectuoso es codigo malo, no una variable mal puesta.
+ *
+ * Va DELIBERADAMENTE fuera de `manejarErrores`. Dentro, el error se convertiria en una
+ * respuesta 500 y la metrica `AWS/Lambda Errors` seguiria en cero; solo se enteraria la
+ * alarma de 5xx del gateway. Lanzando aqui, el fallo cuenta como error de Lambda y
+ * dispara las dos alarmas, que es justo lo que queremos demostrar.
+ */
+declare const __CAOS__: boolean;
+const fallaAdrede = __CAOS__;
+
+export const handler = async (evento: EventoApiGateway): Promise<RespuestaHttp> => {
+  if (fallaAdrede) {
+    logger.error('Fallo sintetico inyectado (prueba de rollback del canary)');
+    throw new Error(
+      'Fallo sintetico inyectado para validar el rollback automatico. ' +
+        'Si ves esto en produccion de verdad, revisa el parametro InyectarFallo del stack.',
+    );
+  }
+  return enrutar(evento);
+};

@@ -28,7 +28,15 @@ param(
   [string]$Servicio,
 
   [string]$RegionAws = 'us-east-2',
-  [switch]$SoloConstruir
+  [switch]$SoloConstruir,
+
+  # Pares Clave=Valor para sam deploy --parameter-overrides.
+  [string[]]$Parametros = @(),
+
+  # Construye la variante con el fallo sintetico inyectado, para la prueba de rollback.
+  # Cambia el bundle de verdad, que es lo unico que hace publicar una version nueva a SAM
+  # y por tanto lo unico que arranca el canary.
+  [switch]$Caos
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,10 +53,14 @@ $env:PYTHONNOUSERSITE = '1'
 Write-Host "== $Servicio ==" -ForegroundColor Cyan
 
 # --- 1. Bundle ---------------------------------------------------------------------------
-Write-Host "Construyendo el bundle..." -ForegroundColor Cyan
+$tareaBuild = if ($Caos) { 'build:caos' } else { 'build' }
+if ($Caos) {
+  Write-Host "MODO CAOS: se inyecta un fallo sintetico. Esta version DEBE ser revertida." -ForegroundColor Red
+}
+Write-Host "Construyendo el bundle ($tareaBuild)..." -ForegroundColor Cyan
 Push-Location $raiz
 try {
-  npm run build --workspace "@emergencias/$Servicio"
+  npm run $tareaBuild --workspace "@emergencias/$Servicio"
   if ($LASTEXITCODE -ne 0) { throw "Fallo el build de $Servicio." }
 }
 finally { Pop-Location }
@@ -64,17 +76,26 @@ if ($SoloConstruir) { Write-Host "Solo construir: no se despliega." -ForegroundC
 $stack = "emergencias-$Servicio"
 Write-Host "Desplegando el stack $stack..." -ForegroundColor Cyan
 
+# No usar $args: es una variable automatica de PowerShell y reutilizarla trae sorpresas.
+$argumentos = @(
+  'deploy'
+  '--template-file', 'template.yaml'
+  '--stack-name', $stack
+  '--region', $RegionAws
+  '--capabilities', 'CAPABILITY_NAMED_IAM'
+  '--resolve-s3'
+  '--no-confirm-changeset'
+  '--no-fail-on-empty-changeset'
+)
+if ($Parametros.Count -gt 0) {
+  Write-Host "Parametros: $($Parametros -join ' ')" -ForegroundColor DarkYellow
+  $argumentos += '--parameter-overrides'
+  $argumentos += $Parametros
+}
+
 Push-Location (Join-Path $raiz "services/$Servicio")
 try {
-  & $sam deploy `
-    --template-file template.yaml `
-    --stack-name $stack `
-    --region $RegionAws `
-    --capabilities CAPABILITY_NAMED_IAM `
-    --resolve-s3 `
-    --no-confirm-changeset `
-    --no-fail-on-empty-changeset
-
+  & $sam @argumentos
   if ($LASTEXITCODE -ne 0) { throw "Fallo el despliegue de $stack." }
 }
 finally { Pop-Location }
