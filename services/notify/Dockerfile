@@ -1,9 +1,9 @@
-# Imagen OCI del microservicio Intake.
+# Imagen OCI del microservicio Notify.
 #
 # El contexto de build es la RAIZ del monorepo, no esta carpeta, porque el servicio
 # depende del workspace @emergencias/shared. Se construye asi:
 #
-#   docker build -f services/intake/Dockerfile -t emergencias-intake .
+#   docker build -f services/notify/Dockerfile -t emergencias-notify .
 #
 # Multi-stage a proposito: la etapa final no contiene ni node_modules, ni codigo fuente,
 # ni el compilador. Solo un archivo JavaScript con todo lo necesario ya empaquetado.
@@ -19,20 +19,20 @@ WORKDIR /build
 # cambian las dependencias, no cada vez que se toca una linea de codigo.
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json packages/shared/
-COPY services/intake/package.json services/intake/
+COPY services/notify/package.json services/notify/
 
 RUN npm ci
 
 # Ahora si, el codigo.
 COPY tsconfig.base.json ./
 COPY packages/shared packages/shared
-COPY services/intake services/intake
+COPY services/notify services/notify
 
 # Un unico archivo con todo dentro.
 #   --format=cjs      el runtime de Lambda carga el handler como CommonJS
 #   --external:pg-native  pg intenta requerirlo de forma opcional para usar libpq; no lo
 #                     usamos, y sin marcarlo como externo esbuild falla al no encontrarlo
-RUN npx esbuild services/intake/src/index.ts \
+RUN npx esbuild services/notify/src/index.ts \
       --bundle \
       --platform=node \
       --target=node22 \

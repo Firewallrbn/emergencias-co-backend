@@ -9,6 +9,7 @@ import {
   consultar,
   verificarSalud,
   manejarErrores,
+  responder,
   ok,
   creado,
   errorValidacion,
@@ -34,8 +35,26 @@ import type { DatosTriaje } from './triaje.ts';
 const sqs = new SQSClient({});
 const URL_COLA = process.env['COLA_DESPACHOS_URL'];
 
-async function publicarParaDespacho(emergenciaId: string, ciudad: string, prioridad: string): Promise<void> {
-  if (!URL_COLA) throw new Error('Falta COLA_DESPACHOS_URL; deberia inyectarlo el template');
+/**
+ * Publica la emergencia para que dispatch la recoja.
+ *
+ * Devuelve si llegó a encolarse. Sin cola configurada NO se lanza error: eso solo ocurre
+ * en la demostración local con docker compose, donde no hay SQS, y hacer fallar la
+ * petición dejaría la emergencia registrada pero devolvería un 500 al ciudadano — el peor
+ * de los dos mundos. Se avisa en el log y se informa al cliente en la respuesta.
+ */
+async function publicarParaDespacho(
+  emergenciaId: string,
+  ciudad: string,
+  prioridad: string,
+): Promise<boolean> {
+  if (!URL_COLA) {
+    logger.warn('Sin cola configurada: la emergencia no se encola para despacho', {
+      emergenciaId,
+      nota: 'Esperado solo en la demostracion local; en AWS lo inyecta el template.',
+    });
+    return false;
+  }
 
   await conReintentos(
     () =>
@@ -52,6 +71,7 @@ async function publicarParaDespacho(emergenciaId: string, ciudad: string, priori
         logger.warn('Reintentando publicacion en la cola', { intento, esperaMs, emergenciaId }),
     },
   );
+  return true;
 }
 
 /** Forma mínima del evento de API Gateway (REST, integración proxy) que consumimos. */
@@ -236,7 +256,7 @@ async function crearEmergencia(evento: EventoApiGateway): Promise<RespuestaHttp>
   // cliente reintenta, encuentra el duplicado, y la emergencia se quedaria registrada para
   // siempre sin que nadie la despache. Publicar siempre cierra ese hueco, y dispatch ya es
   // idempotente: un despacho activo existente no genera otro.
-  await publicarParaDespacho(fila.id, v.ciudad, fila.prioridad);
+  const encolada = await publicarParaDespacho(fila.id, v.ciudad, fila.prioridad);
 
   const cuerpo = {
     id: fila.id,
@@ -244,6 +264,8 @@ async function crearEmergencia(evento: EventoApiGateway): Promise<RespuestaHttp>
     triage_score: fila.triage_score,
     creado_en: fila.creado_en,
     duplicado: !fila.fue_creada,
+    // Falso solo en la demostracion local, donde no hay cola. En AWS siempre es cierto.
+    despacho_encolado: encolada,
   };
 
   // 201 si se creo, 200 si ya existia. El cliente distingue sin tener que interpretar.
@@ -267,18 +289,17 @@ async function obtenerEmergencia(evento: EventoApiGateway): Promise<RespuestaHtt
 
 async function salud(): Promise<RespuestaHttp> {
   const bd = await verificarSalud();
-  return {
-    statusCode: bd.ok ? 200 : 503,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-    body: JSON.stringify({
-      servicio: 'intake',
-      estado: bd.ok ? 'ok' : 'degradado',
-      // Se expone la version desplegada para poder ver, durante el canary, que porcentaje
-      // del trafico esta atendiendo cada version.
-      version: process.env['AWS_LAMBDA_FUNCTION_VERSION'] ?? 'desconocida',
-      baseDatos: bd,
-    }),
-  };
+  // Se usa `responder` en vez de construir el objeto a mano para no saltarse las
+  // cabeceras comunes: sin ellas esta respuesta saldria sin CORS y el panel no podria
+  // leerla, aunque el estado fuera 200.
+  return responder(bd.ok ? 200 : 503, {
+    servicio: 'intake',
+    estado: bd.ok ? 'ok' : 'degradado',
+    // Se expone la version desplegada para poder ver, durante el canary, que porcentaje
+    // del trafico esta atendiendo cada version.
+    version: process.env['AWS_LAMBDA_FUNCTION_VERSION'] ?? 'desconocida',
+    baseDatos: bd,
+  });
 }
 
 const enrutar = manejarErrores(async (evento: EventoApiGateway): Promise<RespuestaHttp> => {

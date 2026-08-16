@@ -31,6 +31,15 @@ Parameters:
       pool sin reservar por debajo del minimo de 10 que exige Lambda, y el despliegue
       falla. Si algun dia se eleva la cuota, basta con pasar un valor mayor que 0.
 
+  OrigenPermitido:
+    Type: String
+    Default: https://emergencias-co-frontend.vercel.app
+    Description: >
+      Origen autorizado por CORS. Debe coincidir con el del API Gateway. Hace falta aqui
+      ademas de alli porque con integracion AWS_PROXY el gateway NO anade cabeceras CORS a
+      la respuesta real: solo genera el OPTIONS del preflight. La cabecera la pone la
+      propia funcion (packages/shared/src/http.ts).
+
 Conditions:
   HayReserva: !Not [!Equals [!Ref ConcurrenciaReservada, 0]]
 
@@ -69,6 +78,7 @@ Resources:
           LOG_LEVEL: info
           # Mantiene viva la conexion TCP entre invocaciones del mismo contenedor.
           AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+          ORIGEN_PERMITIDO: !Ref OrigenPermitido
           # La cola pertenece al stack de dispatch: el consumidor es su dueno. Intake solo
           # la conoce a traves de esta importacion, que ademas crea la dependencia de
           # despliegue correcta (dispatch primero).

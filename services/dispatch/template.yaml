@@ -17,6 +17,15 @@ Parameters:
     Type: Number
     Default: 2000
 
+  OrigenPermitido:
+    Type: String
+    Default: https://emergencias-co-frontend.vercel.app
+    Description: >
+      Origen autorizado por CORS. Debe coincidir con el del API Gateway. Hace falta aqui
+      ademas de alli porque con integracion AWS_PROXY el gateway NO anade cabeceras CORS a
+      la respuesta real: solo genera el OPTIONS del preflight. La cabecera la pone la
+      propia funcion (packages/shared/src/http.ts).
+
 Globals:
   Function:
     Runtime: nodejs22.x
@@ -68,6 +77,7 @@ Resources:
           SERVICE_NAME: dispatch
           LOG_LEVEL: info
           AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+          ORIGEN_PERMITIDO: !Ref OrigenPermitido
       AutoPublishAlias: !Ref Etapa
       DeploymentPreference:
         Type: Canary10Percent5Minutes

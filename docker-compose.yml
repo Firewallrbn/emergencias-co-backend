@@ -1,0 +1,129 @@
+# Demostración local del sistema completo.
+#
+#   docker compose up --build
+#   curl http://localhost:8080/v1/health
+#
+# Levanta los cuatro microservicios como contenedores OCI, un API Gateway local que
+# traduce HTTP corriente al evento que esperan las funciones, y una base PostGIS con las
+# migraciones y el seed ya aplicados. La topología es la misma que en producción: un
+# único punto de entrada delante de cuatro servicios autónomos.
+#
+# Tres decisiones que conviene explicar:
+#
+# 1. Las imágenes son EXACTAMENTE las mismas que se desplegarían. No hay una variante
+#    "de desarrollo": lo que se demuestra aquí es lo que correría en la nube.
+#
+# 2. Es AUTOCONTENIDO. No hace falta cuenta de AWS, ni proyecto de Supabase, ni
+#    credenciales de ningún tipo. Cualquiera puede clonarlo y levantarlo. Una primera
+#    versión leía los secretos de Parameter Store montando las credenciales locales, y
+#    era más fiel a producción, pero solo funcionaba en la máquina del autor: inútil
+#    como demostración para otra persona.
+#
+# 3. La contraseña de la base está a la vista y eso es correcto. Protege un contenedor
+#    efímero que se destruye con `docker compose down`, sin un solo dato real dentro.
+#    Fingir un secreto donde no lo hay solo confundiría sobre dónde están los de verdad:
+#    esos viven en AWS Parameter Store y se generan con scripts/configurar-credenciales.ps1.
+
+x-microservicio: &microservicio
+  expose: ['8080'] # El Runtime Interface Emulator de la imagen base escucha aquí.
+  depends_on:
+    postgis:
+      condition: service_healthy
+  restart: unless-stopped
+
+x-entorno: &entorno
+  AWS_REGION: us-east-2
+  LOG_LEVEL: info
+  AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+  ORIGEN_PERMITIDO: 'http://localhost:3000'
+
+services:
+  # ---------------------------------------------------------------------------------
+  # Base de datos
+  # ---------------------------------------------------------------------------------
+  postgis:
+    image: postgis/postgis:17-3.5
+    container_name: emergencias-postgis
+    environment:
+      POSTGRES_PASSWORD: postgres-local
+      POSTGRES_DB: postgres
+      CLAVE_SERVICIOS_LOCAL: demo-local
+    volumes:
+      - ./local/initdb:/docker-entrypoint-initdb.d:ro
+      - ./db:/db:ro
+    ports:
+      # Expuesto para poder inspeccionar con psql durante la demostración.
+      - '55433:5432'
+    healthcheck:
+      # `pg_isready` responde durante la inicialización, cuando la base todavía no tiene
+      # las tablas. Se comprueba que el seed haya terminado, que es lo que de verdad
+      # necesitan los servicios antes de arrancar.
+      test: ['CMD-SHELL', 'psql -U postgres -tAc "select count(*) from intake.emergencias" || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------------
+  # Microservicios
+  # ---------------------------------------------------------------------------------
+  intake:
+    <<: *microservicio
+    build: { context: ., dockerfile: services/intake/Dockerfile }
+    image: emergencias-intake:local
+    container_name: emergencias-intake
+    environment:
+      <<: *entorno
+      SERVICE_NAME: intake
+      DATABASE_URL: postgresql://svc_intake:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+      # Sin SQS en local: intake registra la emergencia y el envío a la cola falla. El
+      # camino completo con cola se demuestra contra producción.
+      COLA_DESPACHOS_URL: ''
+
+  dispatch:
+    <<: *microservicio
+    build: { context: ., dockerfile: services/dispatch/Dockerfile }
+    image: emergencias-dispatch:local
+    container_name: emergencias-dispatch
+    environment:
+      <<: *entorno
+      SERVICE_NAME: dispatch
+      DATABASE_URL: postgresql://svc_dispatch:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+
+  geo:
+    <<: *microservicio
+    build: { context: ., dockerfile: services/geo/Dockerfile }
+    image: emergencias-geo:local
+    container_name: emergencias-geo
+    environment:
+      <<: *entorno
+      SERVICE_NAME: geo
+      DATABASE_URL: postgresql://svc_geo:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+
+  notify:
+    <<: *microservicio
+    build: { context: ., dockerfile: services/notify/Dockerfile }
+    image: emergencias-notify:local
+    container_name: emergencias-notify
+    environment:
+      <<: *entorno
+      SERVICE_NAME: notify
+      DATABASE_URL: postgresql://svc_notify:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+
+  # ---------------------------------------------------------------------------------
+  # Punto único de entrada
+  # ---------------------------------------------------------------------------------
+  gateway:
+    # Node a secas: este contenedor solo reenvía peticiones y no necesita dependencias.
+    image: node:22-alpine
+    container_name: emergencias-gateway
+    working_dir: /app
+    command: ['node', 'gateway.js']
+    volumes:
+      - ./local:/app:ro
+    ports:
+      - '8080:8080'
+    environment:
+      PUERTO: '8080'
+    depends_on: [intake, dispatch, geo, notify]
+    restart: unless-stopped

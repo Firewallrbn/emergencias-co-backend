@@ -13,11 +13,26 @@ export interface RespuestaHttp {
   body: string;
 }
 
+/**
+ * Origen autorizado por CORS. Lo inyecta el template de cada servicio; debe coincidir con
+ * el del API Gateway. No es un secreto: es el dominio público del frontend.
+ */
+const ORIGEN = process.env['ORIGEN_PERMITIDO'];
+
 const CABECERAS_BASE: Record<string, string> = {
   'Content-Type': 'application/json; charset=utf-8',
   // Un cliente que reintenta con la misma Idempotency-Key no debe recibir una respuesta cacheada.
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
+
+  // CORS en TODAS las respuestas, no solo en el preflight.
+  //
+  // Con integración AWS_PROXY, API Gateway no añade cabeceras CORS a la respuesta real: la
+  // propiedad `Cors` de SAM únicamente genera el método OPTIONS simulado. El resultado es
+  // engañoso — el preflight responde 200 con las cabeceras correctas y el GET siguiente
+  // llega sin ellas, así que el navegador lo bloquea y el frontend solo ve un
+  // "Failed to fetch" sin más pistas. La cabecera tiene que ponerla la propia función.
+  ...(ORIGEN ? { 'Access-Control-Allow-Origin': ORIGEN, Vary: 'Origin' } : {}),
 };
 
 export function responder(

@@ -45,6 +45,8 @@ paths = [
 regexTarget = "line"
 regexes = [
   '''<[A-Za-z_][A-Za-z0-9_-]*>''',
-  '''\$\{[A-Za-z_]+\}''',
+  # Sustituciones de variable, incluida la forma con valor por defecto de docker compose
+  # (`${VAR:-valor}`), que es como se declaran las contraseñas de juguete del entorno local.
+  '''\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}''',
   '''(EJEMPLO|PLACEHOLDER|REEMPLAZAR|xxxxx)''',
 ]

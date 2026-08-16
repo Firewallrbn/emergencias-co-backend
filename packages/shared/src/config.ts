@@ -27,6 +27,14 @@ const cliente = new SSMClient({});
 export interface Config {
   /** Cadena de conexión al rol Postgres propio del servicio (vía pooler de Supabase). */
   databaseUrl: string;
+  /**
+   * Si la conexión debe cifrarse con TLS.
+   *
+   * Verdadero siempre en la nube: la conexión sale de AWS hacia Supabase por internet y
+   * cifrarla no es opcional. Falso solo en la demostración local, donde el Postgres vive
+   * en la red interna de docker compose y no tiene TLS configurado.
+   */
+  usarTls: boolean;
   /** URL de la cola SQS, solo en los servicios que publican. */
   queueUrl?: string;
   /** Acceso crudo a cualquier otro parámetro del prefijo. */
@@ -61,6 +69,31 @@ async function leerParametros(prefijo: string): Promise<Record<string, string>> 
 }
 
 async function cargar(): Promise<Config> {
+  /**
+   * Escotilla para la demostración local con docker compose.
+   *
+   * En AWS esta variable NO existe y nunca debe existir: la configuración se lee de
+   * Parameter Store, que es lo que exige el enunciado. Solo se usa en `docker compose`,
+   * donde apunta a un Postgres efímero del propio compose con una contraseña de juguete.
+   *
+   * Existe porque la alternativa era peor: obligar a tener credenciales de AWS para poder
+   * levantar la demostración, lo que impediría que alguien más la ejecute en su máquina.
+   */
+  const urlLocal = process.env['DATABASE_URL'];
+  if (urlLocal) {
+    logger.warn(
+      'Usando DATABASE_URL del entorno en lugar de Parameter Store. ' +
+        'Esto solo debe ocurrir en la demostracion local con docker compose.',
+    );
+    return {
+      databaseUrl: urlLocal,
+      // Sin TLS: el Postgres del compose vive en la red interna y no lo tiene configurado.
+      usarTls: false,
+      queueUrl: process.env['COLA_DESPACHOS_URL'],
+      raw: {},
+    };
+  }
+
   if (!PREFIJO) {
     throw new Error(
       'Falta CONFIG_PREFIX. Debe definirlo el template SAM, p. ej. /emergencias/prod/intake',
@@ -89,7 +122,7 @@ async function cargar(): Promise<Config> {
     latencyMs: Date.now() - inicio,
   });
 
-  return { databaseUrl, queueUrl: raw['queue_url'], raw };
+  return { databaseUrl, usarTls: true, queueUrl: raw['queue_url'], raw };
 }
 
 let promesaConfig: Promise<Config> | undefined;

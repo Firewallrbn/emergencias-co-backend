@@ -39,14 +39,18 @@ const breaker = new CircuitBreaker({
 async function obtenerPool(): Promise<pg.Pool> {
   if (pool) return pool;
 
-  const { databaseUrl } = await obtenerConfig();
+  const { databaseUrl, usarTls } = await obtenerConfig();
 
   pool = new Pool({
     connectionString: databaseUrl,
     max: 1,
     // Supabase exige TLS. El pooler presenta un certificado que no encadena con el
     // almacén del runtime de Lambda, así que se cifra sin verificar la cadena.
-    ssl: { rejectUnauthorized: false },
+    //
+    // En la demostración local se desactiva: el Postgres del compose está en la red
+    // interna de docker y no tiene TLS. Exigirlo allí haría fallar la conexión con un
+    // "The server does not support SSL connections" que no apunta a la causa real.
+    ssl: usarTls ? { rejectUnauthorized: false } : false,
     // Por debajo del timeout de la Lambda: mejor fallar rápido que agotar el tiempo.
     connectionTimeoutMillis: 5_000,
     idleTimeoutMillis: 30_000,

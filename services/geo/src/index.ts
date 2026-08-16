@@ -9,6 +9,7 @@ import {
   consultar,
   verificarSalud,
   manejarErrores,
+  responder,
   ok,
   errorValidacion,
   esCiudad,
@@ -156,16 +157,14 @@ async function aisladas(evento: EventoApiGateway): Promise<RespuestaHttp> {
 
 async function salud(): Promise<RespuestaHttp> {
   const bd = await verificarSalud();
-  return {
-    statusCode: bd.ok ? 200 : 503,
-    headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
-    body: JSON.stringify({
-      servicio: 'geo',
-      estado: bd.ok ? 'ok' : 'degradado',
-      version: process.env['AWS_LAMBDA_FUNCTION_VERSION'] ?? 'desconocida',
-      baseDatos: bd,
-    }),
-  };
+  // Se usa `responder` en vez de construir el objeto a mano para no saltarse las
+  // cabeceras comunes: sin ellas esta respuesta saldria sin CORS.
+  return responder(bd.ok ? 200 : 503, {
+    servicio: 'geo',
+    estado: bd.ok ? 'ok' : 'degradado',
+    version: process.env['AWS_LAMBDA_FUNCTION_VERSION'] ?? 'desconocida',
+    baseDatos: bd,
+  });
 }
 
 const enrutar = manejarErrores(async (evento: EventoApiGateway): Promise<RespuestaHttp> => {
