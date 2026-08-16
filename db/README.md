@@ -60,36 +60,44 @@ Al aplicar `007_realtime.sql` en el contenedor local aparece
 un problema: Postgres a secas arranca con `wal_level=replica`, mientras que Supabase ya
 viene configurado en `logical`.
 
-## Contraseñas de los roles de servicio — paso manual, una sola vez
+## Contraseñas de los roles de servicio
 
 Las migraciones crean los roles `svc_*` **sin contraseña y sin capacidad de login**. Es
-deliberado: una contraseña escrita aquí acabaría en el repositorio, que es exactamente lo
-que el enunciado prohíbe.
+deliberado: una contraseña escrita en una migración acabaría en el repositorio, que es
+exactamente lo que el enunciado prohíbe.
 
-Por cada servicio, con una contraseña generada al azar y **fuera de todo archivo del repo**:
-
-```sql
--- En el SQL Editor de Supabase, una vez por rol
-alter role svc_intake login password '<contrasena-generada>';
-```
-
-Y acto seguido, la cadena de conexión va directo a Parameter Store:
+Para asignarlas hay un script que lo hace todo de una vez:
 
 ```powershell
-aws ssm put-parameter `
-  --name /emergencias/prod/intake/database_url `
-  --type SecureString `
-  --value "postgresql://svc_intake:<contrasena>@<host>:6543/postgres" `
-  --region us-east-2
+.\scripts\configurar-credenciales.ps1 -PoolerHost aws-1-us-east-2.pooler.supabase.com
 ```
 
-Usa el **puerto 6543** (pooler Supavisor en modo transacción), no el 5432. El código de
+El host del pooler se copia del dashboard de Supabase:
+**Project Settings → Database → Connection string → Transaction pooler**.
+
+Qué hace, por cada uno de los cuatro servicios:
+
+1. Genera una contraseña de 40 caracteres con el RNG criptográfico del sistema.
+2. Ejecuta `alter role svc_<x> with login password ...` en Supabase.
+3. Comprueba que ese rol puede conectarse **por el pooler en modo transacción** (6543),
+   que es exactamente como lo hará la Lambda.
+4. Publica la cadena de conexión en Parameter Store como `SecureString`.
+
+Detalles que importan:
+
+- **Las contraseñas nunca se imprimen, ni se guardan en disco, ni quedan en el historial
+  del shell.** El SQL entra a `psql` por stdin y el valor de SSM por un archivo temporal
+  que se sobrescribe antes de borrarse — ambas cosas para que la contraseña no aparezca en
+  la línea de comandos, que es visible en la lista de procesos.
+- Solo se generan caracteres alfanuméricos: la contraseña se embebe en una URL de conexión
+  y un `@` o un `/` obligarían a codificarla en porcentaje. Se compensa con longitud.
+- Una vez ejecutado, **la única copia está en Parameter Store**. Para consultarla:
+  `aws ssm get-parameter --name /emergencias/prod/intake/database_url --with-decryption`
+- Para rotar las contraseñas, basta con volver a ejecutar el script.
+
+El puerto es el **6543** (Supavisor en modo transacción), no el 5432. El código de
 `packages/shared/src/db.ts` está escrito para ese modo: `max: 1` por contenedor y sentencias
 preparadas sin nombre.
-
-Genera las contraseñas con algo como
-`[Convert]::ToBase64String((1..24 | ForEach-Object { Get-Random -Max 256 }))` y no las
-guardes en ningún archivo: una vez en Parameter Store, se leen desde ahí.
 
 ## Roles de aplicación y RLS
 
