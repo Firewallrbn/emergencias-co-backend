@@ -30,16 +30,21 @@ description = "URL de proyecto Supabase hardcodeada (debe venir de Parameter Sto
 regex = '''https:\/\/[a-z]{20}\.supabase\.co'''
 tags = ["supabase", "config"]
 
-[allowlist]
+# Forma vigente en gitleaks 8.x: `[[allowlists]]` en plural. La antigua `[allowlist]`
+# singular queda anulada al combinarse con `[extend] useDefault = true`, y las excepciones
+# se ignoran en silencio — que es peor que no tenerlas, porque parecen estar puestas.
+[[allowlists]]
 description = "Excepciones controladas"
 paths = [
   '''\.gitleaks\.toml$''',
   '''package-lock\.json$''',
   '''\.env\.example$''',
 ]
-# Marcadores de posición que aparecen en documentación y plantillas
+# `line` en vez del valor detectado: los marcadores viven alrededor del supuesto secreto
+# (por ejemplo `postgresql://svc_intake:<contrasena>@<host>`), no dentro de él.
+regexTarget = "line"
 regexes = [
-  '''<[A-Z_]+>''',
+  '''<[A-Za-z_][A-Za-z0-9_-]*>''',
   '''\$\{[A-Za-z_]+\}''',
   '''(EJEMPLO|PLACEHOLDER|REEMPLAZAR|xxxxx)''',
 ]
