@@ -54,7 +54,9 @@ if (-not (Get-Command 'aws' -ErrorAction SilentlyContinue)) {
 
 # psql se anadio al PATH de usuario despues de instalarlo, asi que una terminal abierta
 # desde antes no lo ve. En vez de fallar por algo tan tonto, se recurre a la ruta conocida.
-$psql = (Get-Command 'psql' -ErrorAction SilentlyContinue)?.Source
+# Sin el operador ?. : no existe en Windows PowerShell 5.1.
+$cmdPsql = Get-Command 'psql' -ErrorAction SilentlyContinue
+$psql = if ($cmdPsql) { $cmdPsql.Source } else { $null }
 if (-not $psql) {
   $rutaConocida = 'C:\Program Files\PostgreSQL\17\bin\psql.exe'
   if (Test-Path $rutaConocida) {
@@ -128,13 +130,33 @@ function New-Password {
   param([int]$Longitud = 40)
 
   $alfabeto = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
-  $bytes = [byte[]]::new($Longitud)
-  # RNG criptografico, no Get-Random: este ultimo no sirve para material de seguridad.
-  [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+  $n = $alfabeto.Length   # 62
 
-  $sb = [System.Text.StringBuilder]::new($Longitud)
-  foreach ($b in $bytes) { [void]$sb.Append($alfabeto[$b % $alfabeto.Length]) }
-  return $sb.ToString()
+  # RNG criptografico, no Get-Random: este ultimo no sirve para material de seguridad.
+  # Se usa Create() en vez del metodo estatico Fill(), que solo existe en .NET 5+ y no en
+  # el .NET Framework sobre el que corre Windows PowerShell 5.1.
+  $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+  try {
+    $sb = New-Object System.Text.StringBuilder
+    $buffer = New-Object byte[] 1
+
+    # Muestreo por rechazo. Un simple `byte % 62` estaria sesgado: 256 no es multiplo de 62,
+    # asi que los primeros 8 caracteres del alfabeto saldrian con mas probabilidad que el
+    # resto. Se descartan los bytes por encima del mayor multiplo de 62 (248) y se vuelve
+    # a tirar. El sesgo desaparece y el coste es de un ~3 % de bytes descartados.
+    $limite = 256 - (256 % $n)   # 248
+
+    while ($sb.Length -lt $Longitud) {
+      $rng.GetBytes($buffer)
+      $b = $buffer[0]
+      if ($b -lt $limite) { [void]$sb.Append($alfabeto[$b % $n]) }
+    }
+
+    return $sb.ToString()
+  }
+  finally {
+    $rng.Dispose()
+  }
 }
 
 # --------------------------------------------------------------------------------------
@@ -181,7 +203,13 @@ foreach ($servicio in $servicios) {
   # El valor va por stdin via un archivo temporal para no exponerlo en la linea de comandos.
   $tmp = [System.IO.Path]::GetTempFileName()
   try {
-    Set-Content -Path $tmp -Value $cadena -NoNewline -Encoding utf8
+    # UTF-8 SIN BOM, escrito con .NET en vez de Set-Content.
+    # En Windows PowerShell 5.1, `Set-Content -Encoding utf8` antepone el BOM (EF BB BF).
+    # Esos tres bytes acabarian dentro del valor del parametro, y la cadena de conexion
+    # llegaria a la Lambda con basura delante: fallaria con un error de host que no
+    # apunta en absoluto a la causa real.
+    [System.IO.File]::WriteAllText($tmp, $cadena, (New-Object System.Text.UTF8Encoding($false)))
+
     aws ssm put-parameter `
       --name $nombreParametro `
       --type SecureString `
@@ -194,7 +222,7 @@ foreach ($servicio in $servicios) {
   finally {
     # Sobrescribir antes de borrar: un delete a secas deja el contenido en el disco.
     if (Test-Path $tmp) {
-      Set-Content -Path $tmp -Value ('0' * 200) -NoNewline
+      [System.IO.File]::WriteAllText($tmp, ('0' * 400))
       Remove-Item $tmp -Force
     }
   }
