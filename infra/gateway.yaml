@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Punto unico de entrada del sistema. REST API en vez de HTTP API porque es la unica
+  variante que soporta validadores de peticion con JSON Schema y planes de uso, que es
+  justo lo que pide el enunciado.
+
+  Va en un stack aparte del de los servicios: el gateway es infraestructura compartida y
+  cada microservicio conserva su propio ciclo de vida de despliegue.
+
+Parameters:
+  Etapa:
+    Type: String
+    Default: prod
+
+  OrigenPermitido:
+    Type: String
+    Default: https://emergencias-co-frontend.vercel.app
+    Description: >
+      Origen exacto autorizado por CORS. Nada de comodin: el enunciado pide politicas
+      restrictivas para el dominio desplegado en Vercel.
+
+  LimiteTasa:
+    Type: Number
+    Default: 50
+    Description: Peticiones por segundo sostenidas antes de responder 429.
+
+  LimiteRafaga:
+    Type: Number
+    Default: 100
+    Description: Pico instantaneo tolerado por encima de la tasa sostenida.
+
+Resources:
+  # -----------------------------------------------------------------------------------
+  # API
+  # -----------------------------------------------------------------------------------
+  ApiEmergencias:
+    Type: AWS::Serverless::Api
+    Properties:
+      # El nombre es fijo porque las alarmas de 5xx de cada servicio lo usan como
+      # dimension de la metrica. Si cambia aqui, hay que cambiarlo alli.
+      Name: emergencias-api
+      StageName: !Ref Etapa
+      TracingEnabled: true
+
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          # Throttling a nivel de stage. Mitiga la saturacion durante la emergencia.
+          ThrottlingRateLimit: !Ref LimiteTasa
+          ThrottlingBurstLimit: !Ref LimiteRafaga
+          # Metricas detalladas por metodo: sin esto, las alarmas de 5xx solo pueden
+          # observar el stage completo y no distinguir que recurso esta fallando.
+          MetricsEnabled: true
+          DataTraceEnabled: false
+          LoggingLevel: ERROR
+
+      Cors:
+        AllowOrigin: !Sub "'${OrigenPermitido}'"
+        AllowHeaders: "'Content-Type,Idempotency-Key,Authorization'"
+        AllowMethods: "'GET,POST,PATCH,OPTIONS'"
+
+      # Respuestas generadas por el propio gateway, antes de llegar a ninguna Lambda.
+      #
+      # Las cabeceras CORS aqui NO son un detalle cosmetico: cuando el validador rechaza
+      # un payload con 400, esa respuesta la emite el gateway y no pasa por la integracion,
+      # asi que sale SIN cabeceras CORS. El navegador entonces bloquea la lectura y el
+      # frontend recibe un fallo de CORS opaco en lugar del mensaje de validacion. El
+      # usuario veria "error de red" cuando en realidad le falta un campo del formulario.
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${OrigenPermitido}'"
+              Access-Control-Allow-Headers: "'Content-Type,Idempotency-Key,Authorization'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${OrigenPermitido}'"
+              Access-Control-Allow-Headers: "'Content-Type,Idempotency-Key,Authorization'"
+        # Una ruta inexistente devuelve por defecto 403 "Missing Authentication Token",
+        # que confunde (parece un problema de permisos) y filtra que hay API Gateway
+        # detras. Se convierte en un 404 honesto.
+        MISSING_AUTHENTICATION_TOKEN:
+          StatusCode: 404
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !Sub "'${OrigenPermitido}'"
+          ResponseTemplates:
+            application/json: '{"error":"NO_ENCONTRADO","mensaje":"La ruta solicitada no existe"}'
+
+      # Plan de uso declarado a traves de SAM y no como recurso suelto.
+      # Un AWS::ApiGateway::UsagePlan propio se intenta crear antes de que exista el
+      # stage y falla con "API Stage not found"; SAM resuelve ese orden por dentro.
+      #
+      # Nota honesta para el informe: API Gateway NO limita por IP de forma nativa; eso
+      # es AWS WAF con una regla rate-based, unos 5 USD al mes de piso. Con un
+      # presupuesto de 10 USD se documenta como la opcion de produccion deliberadamente
+      # no habilitada, en vez de fingir que un plan de uso limita por IP.
+      Auth:
+        UsagePlan:
+          CreateUsagePlan: PER_API
+          Description: Cuota para Cruz Roja, Bomberos, Defensa Civil y UNGRD
+          Quota:
+            Limit: 10000
+            Period: DAY
+          Throttle:
+            RateLimit: !Ref LimiteTasa
+            BurstLimit: !Ref LimiteRafaga
+
+      DefinitionBody:
+        openapi: 3.0.1
+        info:
+          title: API de Gestion de Emergencias
+          version: '1.0'
+
+        # Validacion de esquemas en el borde. Un payload malformado se rechaza con 400
+        # ANTES de invocar la Lambda: ni se paga la ejecucion, ni se ocupa una de las
+        # pocas ejecuciones concurrentes de la cuenta.
+        x-amazon-apigateway-request-validators:
+          completo:
+            validateRequestBody: true
+            validateRequestParameters: true
+        x-amazon-apigateway-request-validator: completo
+
+        paths:
+          /v1/health:
+            get:
+              responses:
+                '200': { description: Servicio operativo }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-intake-alias-arn
+
+          /v1/emergencias:
+            post:
+              parameters:
+                - name: Idempotency-Key
+                  in: header
+                  required: true
+                  schema:
+                    type: string
+                    minLength: 8
+                    maxLength: 200
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/NuevaEmergencia'
+              responses:
+                '201': { description: Emergencia registrada }
+                # Entrecomillado: en estilo de flujo, una coma sin comillas separa claves
+                # y el resto de la frase se convertiria en una clave con valor nulo.
+                '200': { description: 'Reporte duplicado, se devuelve el existente' }
+                '400': { description: Payload invalido }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-intake-alias-arn
+
+          /v1/emergencias/{id}:
+            get:
+              parameters:
+                - name: id
+                  in: path
+                  required: true
+                  schema: { type: string }
+              responses:
+                '200': { description: Emergencia encontrada }
+                '404': { description: No existe }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-intake-alias-arn
+
+        components:
+          schemas:
+            NuevaEmergencia:
+              type: object
+              required: [tipo, ciudad, descripcion, coordenadas]
+              properties:
+                tipo:
+                  type: string
+                  # Los cuatro tipos del enunciado. El gateway rechaza cualquier otro.
+                  enum: [usar_medica, albergue, suministros, danos]
+                ciudad:
+                  type: string
+                  # Las cuatro ciudades afectadas.
+                  enum: [choco, pereira, cali, manizales]
+                descripcion:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                coordenadas:
+                  type: object
+                  required: [lon, lat]
+                  properties:
+                    lon: { type: number, minimum: -180, maximum: 180 }
+                    lat: { type: number, minimum: -90, maximum: 90 }
+                datos:
+                  type: object
+                  description: Campos criticos que varian segun el tipo de solicitud.
+                contacto: { type: string, maxLength: 200 }
+                reportado_por: { type: string }
+
+  # -----------------------------------------------------------------------------------
+  # Permiso de invocacion
+  #
+  # El alias vive en el stack del microservicio, asi que el permiso se concede aqui
+  # sobre el ARN importado. Sin esto, API Gateway devuelve 500 al intentar invocar.
+  # -----------------------------------------------------------------------------------
+  PermisoInvocarIntake:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue emergencias-intake-alias-arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiEmergencias}/*/*/*'
+
+Outputs:
+  UrlBase:
+    Description: Endpoint base del API Gateway, etapa prod
+    Value: !Sub 'https://${ApiEmergencias}.execute-api.${AWS::Region}.amazonaws.com/${Etapa}'
+    Export:
+      Name: emergencias-api-url
+
+  IdApi:
+    Value: !Ref ApiEmergencias
+    Export:
+      Name: emergencias-api-id

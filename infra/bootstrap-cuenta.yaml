@@ -1,0 +1,45 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Configuracion de cuenta que API Gateway necesita una sola vez, antes de cualquier stack
+  de aplicacion.
+
+  API Gateway escribe los logs de ejecucion con un rol definido A NIVEL DE CUENTA, no por
+  API. Sin el, crear un stage con LoggingLevel falla con "CloudWatch Logs role ARN must be
+  set in account settings to enable logging".
+
+  Va en un stack aparte a proposito: es un ajuste global y compartido. Meterlo en el stack
+  del gateway crearia una dependencia de orden dificil de expresar (el stage lo genera SAM
+  y no se le puede poner DependsOn con comodidad) y, peor, borrar el stack de la aplicacion
+  dejaria la cuenta sin capacidad de registrar logs.
+
+  Se despliega una vez:
+    aws cloudformation deploy --template-file infra/bootstrap-cuenta.yaml \
+      --stack-name emergencias-bootstrap --capabilities CAPABILITY_IAM --region us-east-2
+
+Resources:
+  RolLogsApiGateway:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: Permite a API Gateway escribir logs de ejecucion en CloudWatch
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Politica gestionada por AWS para este proposito exacto. Escribirla a mano no
+        # aportaria nada: concede justo lo necesario para crear y escribir log groups.
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs'
+
+  CuentaApiGateway:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt RolLogsApiGateway.Arn
+
+Outputs:
+  ArnRolLogs:
+    Value: !GetAtt RolLogsApiGateway.Arn
+    Export:
+      Name: emergencias-apigw-logs-role
