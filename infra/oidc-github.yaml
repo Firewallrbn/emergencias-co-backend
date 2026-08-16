@@ -22,12 +22,19 @@ Parameters:
     Default: Firewallrbn/emergencias-co-backend
     Description: Repositorio autorizado, en formato propietario/nombre.
 
-  RamaDespliegue:
+  PatronSujeto:
     Type: String
-    Default: main
+    Default: 'repo:Firewallrbn/emergencias-co-backend:ref:refs/heads/main'
     Description: >
-      Unica rama desde la que se permite desplegar. Restringirla importa: sin esto,
-      cualquiera que abra una rama en el repositorio podria asumir el rol.
+      Patron que debe cumplir la reclamacion `sub` del token de GitHub. Admite comodines.
+
+      Conviene que sea lo mas estrecho posible: con `repo:owner/nombre:*` cualquiera que
+      abra una rama en el repositorio podria asumir el rol. Lo correcto es fijar la rama,
+      como en el valor por defecto.
+
+      Se deja parametrizado porque el formato de `sub` cambia segun el disparador: un
+      push a main produce `ref:refs/heads/main`, un pull request produce
+      `pull_request`, y un job con `environment` produce `environment:<nombre>`.
 
 Resources:
   ProveedorGitHub:
@@ -58,9 +65,9 @@ Resources:
                 # reutilizarse aqui.
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
-                # Solo este repositorio y solo esta rama. `ref:refs/heads/main` excluye
-                # las ramas de trabajo y los pull requests, que no deben desplegar.
-                token.actions.githubusercontent.com:sub: !Sub 'repo:${RepositorioGitHub}:ref:refs/heads/${RamaDespliegue}'
+                # Solo este repositorio y solo lo que permita el patron: las ramas de
+                # trabajo y los pull requests no deben poder desplegar.
+                token.actions.githubusercontent.com:sub: !Ref PatronSujeto
 
       Policies:
         - PolicyName: desplegar-emergencias

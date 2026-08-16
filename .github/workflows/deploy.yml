@@ -99,6 +99,23 @@ jobs:
       - name: Construir el bundle
         run: npm run build --workspace "@emergencias/${{ matrix.servicio }}"
 
+      # Muestra la reclamación `sub` del token que GitHub emite para este trabajo.
+      #
+      # Es exactamente el valor contra el que IAM compara la condición del rol, y cuando no
+      # coincide el error de AWS es tan escueto ("Not authorized to perform
+      # sts:AssumeRoleWithWebIdentity") que no hay forma de adivinar por qué. Verlo ahorra
+      # el ciclo de prueba y error. No expone nada sensible: es un identificador público
+      # del repositorio y la rama, no una credencial.
+      - name: Mostrar el sujeto del token OIDC
+        run: |
+          token=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          carga=$(echo "$token" | cut -d. -f2)
+          # base64url -> base64, con el relleno que exige el decodificador.
+          carga=$(echo "${carga//-/+}" | tr '_' '/')
+          while [ $(( ${#carga} % 4 )) -ne 0 ]; do carga="${carga}="; done
+          echo "sub: $(echo "$carga" | base64 -d 2>/dev/null | jq -r .sub)"
+
       # Sin access keys. GitHub firma un token efímero, AWS lo verifica y devuelve
       # credenciales temporales que caducan al terminar el trabajo. No hay ningún secreto
       # de larga vida guardado en el repositorio.
