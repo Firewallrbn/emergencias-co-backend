@@ -36,7 +36,7 @@ jobs:
     outputs:
       servicios: ${{ steps.calcular.outputs.servicios }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Hacen falta dos commits para poder comparar con el anterior.
           fetch-depth: 2
@@ -87,9 +87,9 @@ jobs:
         servicio: ${{ fromJson(needs.detectar.outputs.servicios) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -103,13 +103,13 @@ jobs:
       # credenciales temporales que caducan al terminar el trabajo. No hay ningún secreto
       # de larga vida guardado en el repositorio.
       - name: Autenticarse en AWS por OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: gh-${{ matrix.servicio }}-${{ github.run_id }}
 
-      - uses: aws-actions/setup-sam@v2
+      - uses: aws-actions/setup-sam@v3
         with:
           use-installer: true
 
