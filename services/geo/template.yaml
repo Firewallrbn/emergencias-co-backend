@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Service 3 - Geospatial & Zone Aggregation. Stack independiente.
+  Las decisiones de diseno estan comentadas en services/intake/template.yaml, que es la
+  plantilla de referencia; aqui solo se anotan las diferencias.
+
+Parameters:
+  Etapa:
+    Type: String
+    Default: prod
+  PrefijoConfig:
+    Type: String
+    Default: /emergencias/prod/geo
+  UmbralLatenciaMs:
+    Type: Number
+    # Mas holgado que en intake: DBSCAN sobre la ventana de 24 h es intrinsecamente mas
+    # caro que un INSERT, y no tendria sentido revertir un despliegue sano por eso.
+    Default: 3000
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 25
+    Tracing: Active
+
+Resources:
+  FuncionGeo:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: emergencias-geo
+      CodeUri: dist/
+      Handler: index.handler
+      Description: Clustering geoespacial de puntos calientes y zonas aisladas
+      Environment:
+        Variables:
+          CONFIG_PREFIX: !Ref PrefijoConfig
+          SERVICE_NAME: geo
+          LOG_LEVEL: info
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+      AutoPublishAlias: !Ref Etapa
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Role: !GetAtt RolCodeDeploy.Arn
+        Alarms:
+          - !Ref AlarmaErrores
+          - !Ref AlarmaLatencia
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: [ssm:GetParametersByPath, ssm:GetParameter, ssm:GetParameters]
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PrefijoConfig}'
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PrefijoConfig}/*'
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+
+  GrupoLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/emergencias-geo
+      RetentionInDays: 7
+
+  AlarmaErrores:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-geo-errores
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FuncionGeo
+        - Name: Resource
+          Value: !Sub '${FuncionGeo}:${Etapa}'
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  AlarmaLatencia:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-geo-latencia
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FuncionGeo
+        - Name: Resource
+          Value: !Sub '${FuncionGeo}:${Etapa}'
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: !Ref UmbralLatenciaMs
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  RolCodeDeploy:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: emergencias-geo-codedeploy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codedeploy.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSCodeDeployRoleForLambdaLimited'
+
+Outputs:
+  ArnAlias:
+    Value: !Ref FuncionGeo.Alias
+    Export:
+      Name: emergencias-geo-alias-arn

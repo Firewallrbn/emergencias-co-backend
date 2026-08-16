@@ -1,0 +1,199 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Service 2 - Dispatch & Resource Assignment. Stack independiente.
+  Ademas de la funcion, este stack es dueno de la COLA que separa intake de dispatch:
+  el consumidor posee su cola, no el productor. Las decisiones generales de diseno estan
+  comentadas en services/intake/template.yaml.
+
+Parameters:
+  Etapa:
+    Type: String
+    Default: prod
+  PrefijoConfig:
+    Type: String
+    Default: /emergencias/prod/dispatch
+  UmbralLatenciaMs:
+    Type: Number
+    Default: 2000
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [x86_64]
+    MemorySize: 512
+    Timeout: 30
+    Tracing: Active
+
+Resources:
+  # ---------------------------------------------------------------------------------
+  # Cola y DLQ — Queue-Based Load Leveling
+  # ---------------------------------------------------------------------------------
+  ColaMuertos:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: emergencias-despachos-dlq
+      # 14 dias: si algo cae aqui durante una emergencia, tiene que seguir estando el
+      # lunes siguiente para poder investigarlo con calma.
+      MessageRetentionPeriod: 1209600
+
+  ColaDespachos:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: emergencias-despachos
+      # Debe ser >= al timeout de la funcion (30 s), con margen. Si fuera menor, SQS
+      # devolveria el mensaje a la cola mientras todavia se esta procesando y otro
+      # contenedor lo tomaria en paralelo: trabajo duplicado garantizado.
+      VisibilityTimeout: 180
+      MessageRetentionPeriod: 345600
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ColaMuertos.Arn
+        # Tres intentos. Mas alla de eso el problema no es transitorio, y seguir
+        # reintentando solo consume la escasa concurrencia de la cuenta.
+        maxReceiveCount: 3
+
+  # ---------------------------------------------------------------------------------
+  # Funcion
+  # ---------------------------------------------------------------------------------
+  FuncionDispatch:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: emergencias-dispatch
+      CodeUri: dist/
+      Handler: index.handler
+      Description: Asignacion de unidades por proximidad, consumiendo de SQS
+      Environment:
+        Variables:
+          CONFIG_PREFIX: !Ref PrefijoConfig
+          SERVICE_NAME: dispatch
+          LOG_LEVEL: info
+          AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+      AutoPublishAlias: !Ref Etapa
+      DeploymentPreference:
+        Type: Canary10Percent5Minutes
+        Role: !GetAtt RolCodeDeploy.Arn
+        Alarms:
+          - !Ref AlarmaErrores
+          - !Ref AlarmaLatencia
+          - !Ref AlarmaDlq
+      Events:
+        Cola:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ColaDespachos.Arn
+            # Lotes pequenos: con 10 ejecuciones concurrentes en toda la cuenta, tragar
+            # lotes grandes alargaria cada invocacion y reduciria el paralelismo real.
+            BatchSize: 5
+            MaximumBatchingWindowInSeconds: 10
+            # Informa a SQS de que fallos parciales son posibles, para que solo vuelvan a
+            # la cola los mensajes que realmente fallaron.
+            FunctionResponseTypes: [ReportBatchItemFailures]
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: [ssm:GetParametersByPath, ssm:GetParameter, ssm:GetParameters]
+              Resource:
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PrefijoConfig}'
+                - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${PrefijoConfig}/*'
+            - Effect: Allow
+              Action: kms:Decrypt
+              Resource: !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+              Condition:
+                StringEquals:
+                  kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+
+  GrupoLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/emergencias-dispatch
+      RetentionInDays: 7
+
+  # ---------------------------------------------------------------------------------
+  # Alarmas
+  # ---------------------------------------------------------------------------------
+  AlarmaErrores:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-dispatch-errores
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FuncionDispatch
+        - Name: Resource
+          Value: !Sub '${FuncionDispatch}:${Etapa}'
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  AlarmaLatencia:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-dispatch-latencia
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FuncionDispatch
+        - Name: Resource
+          Value: !Sub '${FuncionDispatch}:${Etapa}'
+      ExtendedStatistic: p95
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: !Ref UmbralLatenciaMs
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  AlarmaDlq:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: emergencias-dispatch-dlq
+      AlarmDescription: >
+        Mensajes en la cola de muertos. Es la senal mas honesta de que un despliegue esta
+        roto: no mide errores tecnicos sino solicitudes de auxilio que nadie llego a
+        despachar. Vigila el canary igual que las otras dos.
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt ColaMuertos.QueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  RolCodeDeploy:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: emergencias-dispatch-codedeploy
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: codedeploy.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSCodeDeployRoleForLambdaLimited'
+
+Outputs:
+  ArnAlias:
+    Value: !Ref FuncionDispatch.Alias
+    Export:
+      Name: emergencias-dispatch-alias-arn
+
+  UrlCola:
+    Description: URL de la cola que consume dispatch. Intake publica aqui.
+    Value: !Ref ColaDespachos
+    Export:
+      Name: emergencias-cola-despachos-url
+
+  ArnCola:
+    Value: !GetAtt ColaDespachos.Arn
+    Export:
+      Name: emergencias-cola-despachos-arn

@@ -181,8 +181,140 @@ Resources:
                   - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
                   - Alias: !ImportValue emergencias-intake-alias-arn
 
+          # ---------------- Service 2: dispatch ----------------
+          /v1/despachos:
+            get:
+              parameters:
+                - name: ciudad
+                  in: query
+                  required: false
+                  schema:
+                    type: string
+                    enum: [choco, pereira, cali, manizales]
+              responses:
+                '200': { description: Listado de despachos }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-dispatch-alias-arn
+
+          /v1/despachos/{id}:
+            patch:
+              parameters:
+                - name: id
+                  in: path
+                  required: true
+                  schema: { type: string }
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/CambioEstadoDespacho'
+              responses:
+                '200': { description: Despacho actualizado }
+                '404': { description: No existe }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-dispatch-alias-arn
+
+          # ---------------- Service 3: geo ----------------
+          /v1/zonas/{ciudad}/clusters:
+            get:
+              parameters:
+                - name: ciudad
+                  in: path
+                  required: true
+                  schema:
+                    type: string
+                    enum: [choco, pereira, cali, manizales]
+              responses:
+                '200': { description: Puntos calientes detectados }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-geo-alias-arn
+
+          /v1/zonas/{ciudad}/aisladas:
+            get:
+              parameters:
+                - name: ciudad
+                  in: path
+                  required: true
+                  schema:
+                    type: string
+                    enum: [choco, pereira, cali, manizales]
+              responses:
+                '200': { description: Emergencias sin vecinos cercanos }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-geo-alias-arn
+
+          # ---------------- Service 4: notify ----------------
+          /v1/notificaciones:
+            post:
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: '#/components/schemas/NuevaNotificacion'
+              responses:
+                '201': { description: Notificacion registrada y difundida }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-notify-alias-arn
+            get:
+              parameters:
+                - name: emergencia_id
+                  in: query
+                  required: true
+                  schema: { type: string }
+              responses:
+                '200': { description: Notificaciones de la emergencia }
+              x-amazon-apigateway-integration:
+                type: aws_proxy
+                httpMethod: POST
+                uri: !Sub
+                  - 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Alias}/invocations'
+                  - Alias: !ImportValue emergencias-notify-alias-arn
+
         components:
           schemas:
+            CambioEstadoDespacho:
+              type: object
+              required: [estado]
+              properties:
+                estado:
+                  type: string
+                  enum: [pendiente, asignado, en_ruta, atendido, cancelado]
+                notas: { type: string, maxLength: 1000 }
+
+            NuevaNotificacion:
+              type: object
+              required: [emergencia_id, asunto]
+              properties:
+                emergencia_id: { type: string }
+                asunto: { type: string, minLength: 1, maxLength: 200 }
+                canal:
+                  type: string
+                  enum: [webhook, realtime, email]
+                destinatario: { type: string, maxLength: 200 }
+                cuerpo: { type: object }
+
             NuevaEmergencia:
               type: object
               required: [tipo, ciudad, descripcion, coordenadas]
@@ -221,6 +353,30 @@ Resources:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !ImportValue emergencias-intake-alias-arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiEmergencias}/*/*/*'
+
+  PermisoInvocarDispatch:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue emergencias-dispatch-alias-arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiEmergencias}/*/*/*'
+
+  PermisoInvocarGeo:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue emergencias-geo-alias-arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiEmergencias}/*/*/*'
+
+  PermisoInvocarNotify:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue emergencias-notify-alias-arn
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub 'arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiEmergencias}/*/*/*'

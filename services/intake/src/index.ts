@@ -16,11 +16,43 @@ import {
   esCiudad,
   esTipoSolicitud,
   esCoordenadaValida,
+  conReintentos,
   logger,
 } from '@emergencias/shared';
 import type { RespuestaHttp } from '@emergencias/shared';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 import { calcularTriaje } from './triaje.ts';
 import type { DatosTriaje } from './triaje.ts';
+
+/**
+ * Publicacion en la cola de despachos — Queue-Based Load Leveling.
+ *
+ * El cliente se crea a nivel de modulo para reutilizar la conexion entre invocaciones del
+ * mismo contenedor. La URL la inyecta el template importandola del stack de dispatch: el
+ * consumidor es dueno de su cola, intake solo la conoce.
+ */
+const sqs = new SQSClient({});
+const URL_COLA = process.env['COLA_DESPACHOS_URL'];
+
+async function publicarParaDespacho(emergenciaId: string, ciudad: string, prioridad: string): Promise<void> {
+  if (!URL_COLA) throw new Error('Falta COLA_DESPACHOS_URL; deberia inyectarlo el template');
+
+  await conReintentos(
+    () =>
+      sqs.send(
+        new SendMessageCommand({
+          QueueUrl: URL_COLA,
+          MessageBody: JSON.stringify({ emergencia_id: emergenciaId, ciudad, prioridad }),
+        }),
+      ),
+    {
+      intentos: 3,
+      baseMs: 100,
+      alReintentar: (intento, esperaMs) =>
+        logger.warn('Reintentando publicacion en la cola', { intento, esperaMs, emergenciaId }),
+    },
+  );
+}
 
 /** Forma mínima del evento de API Gateway (REST, integración proxy) que consumimos. */
 interface EventoApiGateway {
@@ -196,6 +228,15 @@ async function crearEmergencia(evento: EventoApiGateway): Promise<RespuestaHttp>
     factores: triaje.factores,
     duplicado: !fila.fue_creada,
   });
+
+  // Se publica SIEMPRE, tambien en los duplicados.
+  //
+  // Podria parecer despilfarro publicar de nuevo un reporte ya conocido, pero lo contrario
+  // esconde un fallo grave: si la primera vez el INSERT funciono y la publicacion no, el
+  // cliente reintenta, encuentra el duplicado, y la emergencia se quedaria registrada para
+  // siempre sin que nadie la despache. Publicar siempre cierra ese hueco, y dispatch ya es
+  // idempotente: un despacho activo existente no genera otro.
+  await publicarParaDespacho(fila.id, v.ciudad, fila.prioridad);
 
   const cuerpo = {
     id: fila.id,

@@ -69,6 +69,10 @@ Resources:
           LOG_LEVEL: info
           # Mantiene viva la conexion TCP entre invocaciones del mismo contenedor.
           AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+          # La cola pertenece al stack de dispatch: el consumidor es su dueno. Intake solo
+          # la conoce a traves de esta importacion, que ademas crea la dependencia de
+          # despliegue correcta (dispatch primero).
+          COLA_DESPACHOS_URL: !ImportValue emergencias-cola-despachos-url
 
       # --- Despliegue progresivo -----------------------------------------------------
       # El alias es lo que recibe el trafico; API Gateway apunta al alias, nunca a
@@ -112,6 +116,11 @@ Resources:
               Condition:
                 StringEquals:
                   kms:ViaService: !Sub 'ssm.${AWS::Region}.amazonaws.com'
+            # Solo ENVIAR, y solo a esta cola. Intake no puede leerla ni borrar mensajes:
+            # consumir es competencia exclusiva de dispatch.
+            - Effect: Allow
+              Action: sqs:SendMessage
+              Resource: !ImportValue emergencias-cola-despachos-arn
 
   # ---------------------------------------------------------------------------------
   # Logs
