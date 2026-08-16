@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Gobernanza de costos del sistema de gestion de emergencias.
+  Presupuesto mensual estricto con alerta temprana sobre consumo real y alerta
+  anticipada sobre consumo proyectado, para que un pico de carga durante las pruebas
+  no se convierta en un cobro inesperado.
+
+Parameters:
+  EmailAlertas:
+    Type: String
+    Description: Correo que recibira las alertas de presupuesto.
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+    ConstraintDescription: Debe ser una direccion de correo valida.
+
+  LimiteMensualUsd:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    Description: Techo de gasto mensual en dolares.
+
+Resources:
+  PresupuestoMensual:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: emergencias-presupuesto-mensual
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref LimiteMensualUsd
+          Unit: USD
+        CostTypes:
+          # Los creditos y reembolsos no deben enmascarar el consumo real: si un credito
+          # cubre el gasto, la alerta no saltaria y no nos enterariamos del consumo.
+          IncludeCredit: false
+          IncludeRefund: false
+          IncludeSubscription: true
+          IncludeTax: true
+          UseBlended: false
+
+      NotificationsWithSubscribers:
+        # Alerta 1 — consumo REAL por encima del 50 %.
+        # Avisa cuando ya se gasto la mitad: queda margen para reaccionar.
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref EmailAlertas
+
+        # Alerta 2 — consumo PROYECTADO por encima del 85 %.
+        # Esta es la que de verdad protege: AWS extrapola la tendencia del mes y avisa
+        # antes de que el gasto ocurra, no despues.
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 85
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref EmailAlertas
+
+Outputs:
+  NombrePresupuesto:
+    Description: Nombre del presupuesto creado
+    Value: emergencias-presupuesto-mensual
+
+  ConsolaPresupuestos:
+    Description: Enlace directo para capturar la evidencia que pide la rubrica
+    Value: https://us-east-1.console.aws.amazon.com/billing/home#/budgets
