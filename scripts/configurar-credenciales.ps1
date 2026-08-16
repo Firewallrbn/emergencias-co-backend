@@ -31,8 +31,8 @@
 #>
 [CmdletBinding()]
 param(
-  [Parameter(Mandatory = $true)]
-  [string]$PoolerHost,
+  # El proyecto vive en ca-central-1, no en la region de AWS donde corren las Lambdas.
+  [string]$PoolerHost = 'aws-0-ca-central-1.pooler.supabase.com',
 
   [string]$ProjectRef = 'vapnqzhttqcjxdvfpblk',
   [string]$RegionAws  = 'us-east-2',
@@ -48,9 +48,20 @@ $servicios = @('intake', 'dispatch', 'geo', 'notify')
 # --------------------------------------------------------------------------------------
 # Comprobaciones previas
 # --------------------------------------------------------------------------------------
-foreach ($cmd in @('psql', 'aws')) {
-  if (-not (Get-Command $cmd -ErrorAction SilentlyContinue)) {
-    throw "No se encontro '$cmd' en el PATH. psql viene con PostgreSQL 17; aws con la AWS CLI v2."
+if (-not (Get-Command 'aws' -ErrorAction SilentlyContinue)) {
+  throw "No se encontro 'aws' en el PATH. Instala la AWS CLI v2."
+}
+
+# psql se anadio al PATH de usuario despues de instalarlo, asi que una terminal abierta
+# desde antes no lo ve. En vez de fallar por algo tan tonto, se recurre a la ruta conocida.
+$psql = (Get-Command 'psql' -ErrorAction SilentlyContinue)?.Source
+if (-not $psql) {
+  $rutaConocida = 'C:\Program Files\PostgreSQL\17\bin\psql.exe'
+  if (Test-Path $rutaConocida) {
+    $psql = $rutaConocida
+    Write-Host "psql no esta en el PATH de esta terminal; usando $rutaConocida" -ForegroundColor DarkYellow
+  } else {
+    throw "No se encontro psql. Viene con PostgreSQL 17; anade su carpeta bin al PATH."
   }
 }
 
@@ -85,14 +96,15 @@ function Invoke-PsqlAdmin {
   try {
     # El SQL entra por stdin, no por -c: asi la sentencia (que lleva la contrasena nueva)
     # no aparece en la linea de comandos, que es visible en la lista de procesos.
-    $salida = $Sql | psql `
+    $salida = $Sql | & $psql `
       --host=$PoolerHost --port=$Puerto --username=$Usuario --dbname=postgres `
       --set=ON_ERROR_STOP=1 --quiet --no-psqlrc --tuples-only 2>&1
     $codigo = $LASTEXITCODE
     return [pscustomobject]@{ Salida = $salida; Codigo = $codigo }
   }
   finally {
-    Remove-Item Env:PGPASSWORD -ErrorAction SilentlyContinue
+    # Asignar $null en vez de Remove-Item: mismo efecto y no depende de la unidad Env:.
+    $env:PGPASSWORD = $null
   }
 }
 

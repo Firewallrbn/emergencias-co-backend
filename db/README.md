@@ -69,11 +69,17 @@ exactamente lo que el enunciado prohíbe.
 Para asignarlas hay un script que lo hace todo de una vez:
 
 ```powershell
-.\scripts\configurar-credenciales.ps1 -PoolerHost aws-1-us-east-2.pooler.supabase.com
+.\scripts\configurar-credenciales.ps1
 ```
 
-El host del pooler se copia del dashboard de Supabase:
-**Project Settings → Database → Connection string → Transaction pooler**.
+El host del pooler ya viene por defecto: `aws-0-ca-central-1.pooler.supabase.com`. Si algún
+día cambia, se copia del botón **Connect** de la barra superior del dashboard (pestaña
+*Transaction pooler*) y se pasa con `-PoolerHost`.
+
+> **El proyecto de Supabase está en `ca-central-1`, mientras que las Lambdas corren en
+> `us-east-2`.** Cada consulta cruza regiones y suma unos 20-30 ms de ida y vuelta. Es
+> asumible para este sistema, pero conviene tenerlo presente al leer las latencias en
+> CloudWatch: parte del tiempo no es cómputo, es distancia.
 
 Qué hace, por cada uno de los cuatro servicios:
 
