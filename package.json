@@ -1,0 +1,23 @@
+{
+  "name": "emergencias-co-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend serverless de gestion de emergencias - Parcial 1 Patrones Arquitectonicos Avanzados",
+  "workspaces": [
+    "packages/*",
+    "services/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --build",
+    "test": "node --test --experimental-strip-types",
+    "scan": "gitleaks detect --source . --config .gitleaks.toml --log-opts=--all --redact"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0"
+  }
+}
