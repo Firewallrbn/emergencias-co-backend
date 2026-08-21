@@ -182,11 +182,15 @@ async function listarDespachos(evento: EventoApiGateway): Promise<RespuestaHttp>
   }
 
   // La ciudad vive en el agregado de intake, asi que se filtra a traves de la vista ACL.
+  // El tipo de la emergencia se trae por JOIN directo (el rol svc_dispatch tiene SELECT
+  // en intake.emergencias a traves de la vista ACL ya definida — Patron: Anti-Corruption Layer).
   const r = await consultar(
     `select d.id, d.emergencia_id, d.estado::text, d.distancia_m, d.creado_en,
-            u.codigo as unidad, u.organismo::text
+            u.codigo as unidad, u.organismo::text,
+            e.tipo::text as tipo
        from dispatch.despachos d
        left join dispatch.unidades u on u.id = d.unidad_id
+       left join intake.emergencias e on e.id = d.emergencia_id
       where ($1::text is null or u.ciudad::text = $1)
       order by d.creado_en desc
       limit 100`,
