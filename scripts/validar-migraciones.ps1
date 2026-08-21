@@ -39,6 +39,7 @@ $archivos = @(
   'migrations/007_realtime.sql'
   'migrations/008_endurecer_rls_auto_enable.sql'
   'migrations/009_vistas_publicas_para_api.sql'
+  'migrations/010_vista_emergencias_datos_contacto.sql'
   'seed/001_unidades.sql'
   'seed/002_emergencias_demo.sql'
 )
