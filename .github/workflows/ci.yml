@@ -29,6 +29,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_CONFIG: .gitleaks.toml
+          # Fijar la version NO es opcional aqui. La accion instalaba 8.24.3 por defecto,
+          # que ignora en silencio los bloques `[[allowlists]]` en plural — la forma que
+          # usa .gitleaks.toml, y la unica que sobrevive a `[extend] useDefault = true`.
+          # Resultado: el hook de pre-commit (gitleaks local, 8.30.1) daba limpio y el CI
+          # fallaba con 9 falsos positivos sobre el mismo commit. Debe coincidir con la
+          # version que declara el README en "Requisitos locales".
+          GITLEAKS_VERSION: 8.30.1
 
       - uses: actions/setup-node@v7
         with:
