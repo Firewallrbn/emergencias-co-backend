@@ -163,15 +163,15 @@ una sola llave estática en GitHub Secrets, solo el ARN del rol a asumir.
 
 | Qué | Dónde |
 |---|---|
-| Frontend activo en Vercel | <!-- PENDIENTE: pegar URL --> |
-| Endpoint base de API Gateway, etapa `prod` | <!-- PENDIENTE: pegar URL --> |
+| Frontend activo en Vercel | https://emergencias-co-frontend.vercel.app/ |
+| Endpoint base de API Gateway, etapa `prod` | https://rdrlxnfz59.execute-api.us-east-2.amazonaws.com/prod |
 
-La URL del API Gateway es la salida `EndpointBase` del stack `emergencias-gateway`
+La URL del API Gateway es la salida `UrlBase` del stack `emergencias-gateway`
 ([`infra/gateway.yaml:386`](infra/gateway.yaml#L386)). Se recupera con:
 
 ```bash
 aws cloudformation describe-stacks --stack-name emergencias-gateway \
-  --query "Stacks[0].Outputs[?OutputKey=='EndpointBase'].OutputValue" \
+  --query "Stacks[0].Outputs[?OutputKey=='UrlBase'].OutputValue" \
   --output text --region us-east-2
 ```
 
