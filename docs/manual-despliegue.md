@@ -95,21 +95,9 @@ dejaría la cuenta sin capacidad de registrar logs.
 
 ## 4. Base de datos
 
-Crear un proyecto en Supabase y aplicar en orden todo lo que hay en `db/`:
+Crear un proyecto en Supabase y aplicar todo lo que hay en `db/migrations/`, en orden.
 
-```
-db/migrations/001_extensiones_y_schemas.sql
-db/migrations/002_roles_y_permisos.sql
-...
-db/migrations/009_vistas_publicas_para_api.sql
-db/seed/001_unidades.sql
-db/seed/002_emergencias_demo.sql
-```
-
-Todas son idempotentes. El seed falla a propósito si no quedan las **16 combinaciones**
-tipo × ciudad que exige la rúbrica.
-
-**Antes de tocar Supabase**, conviene validarlas contra un PostGIS limpio:
+**Antes de tocar Supabase**, validarlas contra un PostGIS limpio:
 
 ```powershell
 .\scripts\validar-migraciones.ps1
@@ -119,7 +107,31 @@ Levanta un contenedor, replica el layout de Supabase y comprueba cobertura del d
 RLS forzada, ausencia de `BYPASSRLS`, proximidad y clustering. Detectó tres errores reales
 antes de que llegaran al proyecto.
 
-**Comprobar:**
+Ya validadas, se aplican:
+
+```powershell
+.\scripts\aplicar-migraciones-supabase.ps1 -ConSeed        # la primera vez
+.\scripts\aplicar-migraciones-supabase.ps1                 # tras anadir una migracion
+.\scripts\aplicar-migraciones-supabase.ps1 -SoloVerificar  # solo comprobar
+```
+
+Recorre `db/migrations/*.sql` en orden y las aplica todas por el pooler en modo **sesión**
+(puerto 5432; el de transacción no admite todas las sentencias de una migración). Son
+idempotentes por diseño, así que se corre entero cada vez y las ya aplicadas no cambian
+nada. `-ConSeed` añade `db/seed/*.sql`, que se pide explícitamente para no sembrar datos de
+demostración por accidente sobre datos reales.
+
+`db/local-test/` no se aplica nunca en Supabase: son stubs que replican en un Postgres
+pelado lo que Supabase ya provisiona por su cuenta.
+
+Correrlo entero cada vez es lo que evita el fallo silencioso de siempre: alguien añade una
+migración, se olvida de aplicarla, y el síntoma aparece mucho después en el frontend como
+una columna que no existe.
+
+**Comprobar** — el script termina verificando por su cuenta los schemas del dominio, la
+vista pública, las columnas de la última migración, los cuatro roles de servicio, la
+ausencia de `BYPASSRLS` y las **16 combinaciones** tipo × ciudad que exige la rúbrica. A
+mano sería:
 
 ```sql
 select count(distinct (tipo, ciudad)) from intake.emergencias;  -- 16
@@ -280,24 +292,46 @@ La misma consulta, distinto resultado, sin una línea de filtrado en el código.
 
 ---
 
-## Demostración local, sin AWS ni Supabase
+## Demostración local
 
-```bash
+Los contenedores se levantan igual en los dos modos; lo único que cambia es contra qué
+base hablan.
+
+### Modo por defecto — contra Supabase
+
+```powershell
+.\scripts\preparar-env-local.ps1      # una vez por clon
 docker compose up --build
 curl http://localhost:8080/v1/health
 ```
 
-Levanta los cuatro microservicios como contenedores OCI, un API Gateway local que traduce
-HTTP al evento que esperan las funciones, y PostGIS con migraciones y seed aplicados. **No
-hace falta ninguna credencial.**
+La fuente de la verdad es el mismo Postgres gestionado que usan las Lambdas de producción,
+alcanzado por el pooler en modo transacción (6543) y con TLS. Lo que se escriba aquí queda
+escrito de verdad y lo que se lea es el estado real del sistema, así que el frontend
+desplegado en Vercel y estos contenedores ven exactamente los mismos datos.
+
+`preparar-env-local.ps1` descarga las cuatro cadenas de conexión de Parameter Store y las
+escribe en un `.env` que `.gitignore` excluye. Exige AWS CLI autenticada; no hay ninguna
+credencial en el repositorio.
+
+### Modo autocontenido — sin AWS ni Supabase
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+curl http://localhost:8080/v1/health
+```
+
+Añade un PostGIS efímero con migraciones y seed ya aplicados. **No hace falta ninguna
+credencial**, así que cualquiera puede clonar el repositorio y levantarlo. A cambio, los
+datos son los del seed y mueren con `docker compose down`.
 
 Las imágenes son exactamente las que se desplegarían; no hay variante de desarrollo.
 
 Dos diferencias con producción, ambas visibles en la respuesta:
 
 - No hay SQS, así que las emergencias no se encolan: `"despacho_encolado": false`.
-- La contraseña de la base está a la vista en `docker-compose.yml`. Protege un contenedor
-  efímero sin un dato real dentro.
+- En el modo autocontenido la contraseña de la base está a la vista en
+  `docker-compose.local.yml`. Protege un contenedor efímero sin un dato real dentro.
 
 ---
 

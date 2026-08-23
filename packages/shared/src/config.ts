@@ -74,21 +74,28 @@ async function cargar(): Promise<Config> {
    *
    * En AWS esta variable NO existe y nunca debe existir: la configuración se lee de
    * Parameter Store, que es lo que exige el enunciado. Solo se usa en `docker compose`,
-   * donde apunta a un Postgres efímero del propio compose con una contraseña de juguete.
+   * que admite dos destinos distintos:
    *
-   * Existe porque la alternativa era peor: obligar a tener credenciales de AWS para poder
-   * levantar la demostración, lo que impediría que alguien más la ejecute en su máquina.
+   *   - Supabase (el modo por defecto): la misma base que usa producción, alcanzada por
+   *     el pooler en modo transacción a través de internet. Exige TLS.
+   *   - El Postgres efímero del propio compose (`docker-compose.local.yml`): red interna
+   *     de docker, contraseña de juguete y sin TLS configurado.
+   *
+   * De ahí que el TLS no pueda deducirse de la mera presencia de DATABASE_URL, como se
+   * hacía antes: lo decide `DB_TLS`, que fija cada archivo de compose. Se mantiene `false`
+   * por defecto para que el modo local siga funcionando sin declarar nada.
    */
   const urlLocal = process.env['DATABASE_URL'];
   if (urlLocal) {
+    const usarTls = process.env['DB_TLS'] === 'true';
     logger.warn(
       'Usando DATABASE_URL del entorno en lugar de Parameter Store. ' +
         'Esto solo debe ocurrir en la demostracion local con docker compose.',
+      { tls: usarTls },
     );
     return {
       databaseUrl: urlLocal,
-      // Sin TLS: el Postgres del compose vive en la red interna y no lo tiene configurado.
-      usarTls: false,
+      usarTls,
       queueUrl: process.env['COLA_DESPACHOS_URL'],
       raw: {},
     };

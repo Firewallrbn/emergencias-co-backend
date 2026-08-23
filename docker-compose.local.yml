@@ -1,0 +1,79 @@
+# Modo autocontenido: Postgres efímero en vez de Supabase.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yml up --build
+#
+# Este archivo es una CAPA sobre docker-compose.yml, no un sustituto. Reañade la base
+# PostGIS con las migraciones y el seed ya aplicados, reapunta los cuatro servicios a ella
+# y desactiva el TLS.
+#
+# Existe por una razón concreta: el modo por defecto habla con Supabase, y eso exige un
+# proyecto y unas credenciales que solo tiene el equipo. Para que otra persona pueda
+# clonar el repositorio y levantar el sistema completo en su máquina —un evaluador, por
+# ejemplo— hace falta un camino que no dependa de ninguna cuenta. Este es ese camino.
+#
+# Lo que se pierde a cambio: los datos son los del seed y mueren con `docker compose down`.
+# Lo que se gana: cero credenciales.
+#
+# La contraseña de la base está a la vista y eso es correcto. Protege un contenedor
+# efímero, sin un solo dato real dentro. Fingir un secreto donde no lo hay solo confundiría
+# sobre dónde están los de verdad: esos viven en AWS Parameter Store y se generan con
+# scripts/configurar-credenciales.ps1.
+
+x-microservicio-local: &microservicio-local
+  depends_on:
+    postgis:
+      condition: service_healthy
+
+x-entorno-local: &entorno-local
+  # El Postgres del compose vive en la red interna de docker y no tiene TLS configurado.
+  # Exigirlo aquí haría fallar la conexión con un "The server does not support SSL
+  # connections" que no apunta a la causa real.
+  DB_TLS: 'false'
+
+services:
+  postgis:
+    image: postgis/postgis:17-3.5
+    container_name: emergencias-postgis
+    environment:
+      POSTGRES_PASSWORD: postgres-local
+      POSTGRES_DB: postgres
+      CLAVE_SERVICIOS_LOCAL: demo-local
+    volumes:
+      - ./local/initdb:/docker-entrypoint-initdb.d:ro
+      - ./db:/db:ro
+    ports:
+      # Expuesto para poder inspeccionar con psql durante la demostración.
+      - '55433:5432'
+    healthcheck:
+      # `pg_isready` responde durante la inicialización, cuando la base todavía no tiene
+      # las tablas. Se comprueba que el seed haya terminado, que es lo que de verdad
+      # necesitan los servicios antes de arrancar.
+      test: ['CMD-SHELL', 'psql -U postgres -tAc "select count(*) from intake.emergencias" || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  intake:
+    <<: *microservicio-local
+    environment:
+      <<: *entorno-local
+      DATABASE_URL: postgresql://svc_intake:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+
+  dispatch:
+    <<: *microservicio-local
+    environment:
+      <<: *entorno-local
+      DATABASE_URL: postgresql://svc_dispatch:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+
+  geo:
+    <<: *microservicio-local
+    environment:
+      <<: *entorno-local
+      DATABASE_URL: postgresql://svc_geo:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
+
+  notify:
+    <<: *microservicio-local
+    environment:
+      <<: *entorno-local
+      DATABASE_URL: postgresql://svc_notify:${CLAVE_SERVICIOS:-demo-local}@postgis:5432/postgres
